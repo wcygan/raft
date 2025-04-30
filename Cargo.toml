@@ -1,7 +1,10 @@
 [workspace]
 
 members = [
-    # Add member crates here
+    "raft-core",
+    "raft-grpc",
+    "raft-storage",
+    "examples/cluster-demo",
 ]
 
-resolver = "2" 
+resolver = "2"
