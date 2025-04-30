@@ -72,6 +72,43 @@ This project is structured as a Rust [Cargo Workspace](mdc:https:/doc.rust-lang.
 
 When adding new crates, ensure they are added to the `members` list in the root [`Cargo.toml`](mdc:Cargo.toml). When adding dependencies, add them to the `[dependencies]` section of the specific crate's `Cargo.toml` file that requires them. Cargo handles ensuring version compatibility across the workspace.
 
+# Rust Workspace Dependencies
+
+This project utilizes a Cargo Workspace to manage common dependencies across its member crates.
+
+## Common Dependencies
+
+The core dependencies shared across the workspace are defined in the `[workspace.dependencies]` section of the root @`Cargo.toml` file. These include:
+
+*   `wcygan_raft_community_neoeinstein-prost`: Protocol Buffers implementation (via Buf registry).
+*   `wcygan_raft_community_neoeinstein-tonic`: gRPC implementation (via Buf registry).
+*   `tokio`: Asynchronous runtime.
+*   `tracing`: Application-level tracing framework.
+*   `tracing-subscriber`: Utilities for implementing `tracing` subscribers.
+*   `anyhow`: Flexible error handling.
+*   `serde`: Framework for serializing/deserializing Rust data structures.
+*   `bytes`: Utilities for working with bytes.
+*   `thiserror`: Library for deriving `std::error::Error`.
+*   `futures`: Abstractions for asynchronous programming.
+*   `rand`: Random number generation utilities.
+
+## Using Workspace Dependencies in a Crate
+
+To use one of these shared dependencies in a specific crate (e.g., `raft-core`, `raft-grpc`), add it to the `[dependencies]` section of that crate's `Cargo.toml` file and specify `workspace = true`.
+
+Example (in `raft-core/Cargo.toml`):
+
+```toml
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] } # You can still enable features
+wcygan_raft_community_neoeinstein-prost = { workspace = true }
+```
+
+Cargo will then use the version specified in the root `Cargo.toml`'s `[workspace.dependencies]` section, ensuring consistency across the project. You do not need to specify the version again in the individual crate's `Cargo.toml`.
+
 ## Project Overview
 
 This project implements a simplified version of the Raft consensus algorithm using Rust, Tokio, and gRPC. Raft is a distributed consensus algorithm designed to be more understandable than alternatives like Paxos while providing the same safety and reliability guarantees.
