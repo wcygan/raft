@@ -8,3 +8,7 @@ members = [
 ]
 
 resolver = "2"
+
+[workspace.dependencies]
+wcygan_raft_community_neoeinstein-prost = { version = "0.4.0-20250430134232-be6664bc4787.1", registry = "buf" }
+wcygan_raft_community_neoeinstein-tonic = { version = "0.4.1-20250430134232-be6664bc4787.1", registry = "buf" }
