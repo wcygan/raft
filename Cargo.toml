@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    # Add member crates here
+]
+
+resolver = "2" 

@@ -1,0 +1,16 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Rust Workspace Structure
+
+This project is structured as a Rust [Cargo Workspace](mdc:https:/doc.rust-lang.org/book/ch14-03-cargo-workspaces.html).
+
+## Key Points:
+
+*   **Shared Dependencies:** All member crates within the workspace share a single `Cargo.lock` file located at the root. This ensures consistent dependency versions across the entire project. Dependencies added to any crate's `Cargo.toml` are resolved together using this single lock file.
+*   **Root `Cargo.toml`:** The root [`Cargo.toml`](mdc:Cargo.toml) file defines the workspace members. Individual crates have their own `Cargo.toml` files to declare their specific dependencies.
+*   **Output Directory:** Compiled artifacts for all crates are placed in a single `target` directory at the workspace root.
+
+When adding new crates, ensure they are added to the `members` list in the root [`Cargo.toml`](mdc:Cargo.toml). When adding dependencies, add them to the `[dependencies]` section of the specific crate's `Cargo.toml` file that requires them. Cargo handles ensuring version compatibility across the workspace.
