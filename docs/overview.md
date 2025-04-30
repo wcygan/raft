@@ -82,30 +82,75 @@ pub trait Storage {
 
 ### Protocol Buffers for gRPC
 
-We'll define message types in `proto/raft.proto`:
+We'll define message types in `proto/raft/v1/raft.proto`:
 
 ```protobuf
 syntax = "proto3";
 
+package raft.v1;
+
+message LogEntry {
+  uint64 index   = 1;          // position in the replicated log (starts at 1)
+  uint64 term    = 2;          // leader term when entry was created
+  bytes  command = 3;          // opaque state-machine command
+
+  // Reserved tag numbers for graceful, non-breaking evolution (e.g. entry_type).
+  reserved 4, 5, 6, 7, 8, 9;
+}
+
+// AppendEntries (log replication & heartbeat)
 message AppendEntriesRequest {
-  uint64 term = 1;
-  string leader_id = 2;
-  uint64 prev_log_index = 3;
-  uint64 prev_log_term = 4;
-  repeated LogEntry entries = 5;
-  uint64 leader_commit = 6;
+  uint64 term            = 1;  // leader’s current term
+  uint64 leader_id       = 2;  // for redirects by followers
+  uint64 prev_log_index  = 3;  // index of log entry immediately preceding new ones
+  uint64 prev_log_term   = 4;  // term of prev_log_index entry
+  repeated LogEntry entries = 5;  // may be empty for heartbeat
+  uint64 leader_commit   = 6;     // leader’s commit index
 }
 
 message AppendEntriesResponse {
-  uint64 term = 1;
-  bool success = 2;
+  uint64 term         = 1;    // follower’s current term
+  bool   success      = 2;    // true if follower contained matching prefix
+  uint64 match_index  = 3;    // highest index stored on follower
 }
 
-// Other message types...
+//  RequestVote (leader election)
+message RequestVoteRequest {
+  uint64 term             = 1; // candidate’s term
+  uint64 candidate_id     = 2; // candidate requesting vote
+  uint64 last_log_index   = 3; // index of candidate’s last log entry
+  uint64 last_log_term    = 4; // term  of candidate’s last log entry
+}
+
+message RequestVoteResponse {
+  uint64 term         = 1;    // current term of voter
+  bool   vote_granted = 2;    // true = vote given, false = rejected
+}
+
+// InstallSnapshot (optional, for log compaction)
+message InstallSnapshotRequest {
+  uint64 term                 = 1;
+  uint64 leader_id            = 2;
+  uint64 last_included_index  = 3;
+  uint64 last_included_term   = 4;
+  bytes  data                 = 5;  // entire snapshot blob
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+}
+
+// Local persistence record (not sent over the network)
+message HardState {
+  uint64 term         = 1;    // latest term seen
+  uint64 voted_for    = 2;    // candidate_id voted for in current term
+  uint64 commit_index = 3;    // highest log index known to be committed
+}
 
 service RaftService {
-  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
-  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries   (AppendEntriesRequest)  returns (AppendEntriesResponse);
+  rpc RequestVote     (RequestVoteRequest)    returns (RequestVoteResponse);
+  rpc InstallSnapshot (InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
 ```
 
