@@ -10,3 +10,5 @@ The primary purpose of this project is to learn about the Raft consensus algorit
 A key focus is ensuring the implementation is correct and robust, which will be achieved through a comprehensive testing strategy including unit, integration, deterministic cluster, and end-to-end tests.
 
 Refer to [docs/overview.md](mdc:docs/overview.md) for the high-level design and testing approach.
+
+Refer to [raft.proto](mdc:proto/raft/v1/raft.proto) to understand the data model and network APIs of the application
