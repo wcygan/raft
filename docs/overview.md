@@ -87,8 +87,12 @@ We'll define message types in `proto/raft/v1/raft.proto`:
 ```protobuf
 syntax = "proto3";
 
+// Package raft.v1 defines the protocol buffer messages and services for the Raft consensus protocol.
+// This implementation follows the Raft paper (https://raft.github.io/).
 package raft.v1;
 
+// LogEntry represents a single entry in the replicated log.
+// Each entry contains a command for the state machine and info about when it was created.
 message LogEntry {
   uint64 index   = 1;          // position in the replicated log (starts at 1)
   uint64 term    = 2;          // leader term when entry was created
@@ -98,58 +102,76 @@ message LogEntry {
   reserved 4, 5, 6, 7, 8, 9;
 }
 
-// AppendEntries (log replication & heartbeat)
+// AppendEntriesRequest is sent by the leader to replicate log entries and as a heartbeat.
+// It's one of the core RPCs in the Raft protocol.
 message AppendEntriesRequest {
-  uint64 term            = 1;  // leader’s current term
+  uint64 term            = 1;  // leader's current term
   uint64 leader_id       = 2;  // for redirects by followers
   uint64 prev_log_index  = 3;  // index of log entry immediately preceding new ones
   uint64 prev_log_term   = 4;  // term of prev_log_index entry
   repeated LogEntry entries = 5;  // may be empty for heartbeat
-  uint64 leader_commit   = 6;     // leader’s commit index
+  uint64 leader_commit   = 6;     // leader's commit index
 }
 
+// AppendEntriesResponse is the reply to AppendEntriesRequest.
+// It indicates whether the append was successful and helps the leader track follower progress.
 message AppendEntriesResponse {
-  uint64 term         = 1;    // follower’s current term
+  uint64 term         = 1;    // follower's current term
   bool   success      = 2;    // true if follower contained matching prefix
   uint64 match_index  = 3;    // highest index stored on follower
 }
 
-//  RequestVote (leader election)
+// RequestVoteRequest is sent by candidates during elections to gather votes.
 message RequestVoteRequest {
-  uint64 term             = 1; // candidate’s term
+  uint64 term             = 1; // candidate's term
   uint64 candidate_id     = 2; // candidate requesting vote
-  uint64 last_log_index   = 3; // index of candidate’s last log entry
-  uint64 last_log_term    = 4; // term  of candidate’s last log entry
+  uint64 last_log_index   = 3; // index of candidate's last log entry
+  uint64 last_log_term    = 4; // term  of candidate's last log entry
 }
 
+// RequestVoteResponse is the reply to a vote request.
+// It indicates whether the vote was granted to the candidate.
 message RequestVoteResponse {
   uint64 term         = 1;    // current term of voter
   bool   vote_granted = 2;    // true = vote given, false = rejected
 }
 
-// InstallSnapshot (optional, for log compaction)
+// InstallSnapshotRequest is sent by leaders to followers that are too far behind.
+// It contains a snapshot of the state machine to help the follower catch up more quickly.
 message InstallSnapshotRequest {
-  uint64 term                 = 1;
-  uint64 leader_id            = 2;
-  uint64 last_included_index  = 3;
-  uint64 last_included_term   = 4;
+  uint64 term                 = 1;  // leader's current term
+  uint64 leader_id            = 2;  // so follower can redirect clients
+  uint64 last_included_index  = 3;  // the snapshot replaces all entries up through this index
+  uint64 last_included_term   = 4;  // term of last_included_index
   bytes  data                 = 5;  // entire snapshot blob
 }
 
+// InstallSnapshotResponse is the reply to InstallSnapshotRequest.
+// It contains the current term of the follower for leader to update itself.
 message InstallSnapshotResponse {
-  uint64 term = 1;
+  uint64 term = 1;  // current term of the responding server
 }
 
-// Local persistence record (not sent over the network)
+// HardState contains the persistent state that must be saved to stable storage
+// before responding to RPCs to ensure the Raft consensus algorithm's correctness.
 message HardState {
   uint64 term         = 1;    // latest term seen
   uint64 voted_for    = 2;    // candidate_id voted for in current term
   uint64 commit_index = 3;    // highest log index known to be committed
 }
 
+// RaftService provides the core RPCs required for the Raft consensus protocol.
 service RaftService {
+  // AppendEntries is used by the leader to replicate log entries and send heartbeats.
+  // Followers respond with confirmation of receipt or rejection.
   rpc AppendEntries   (AppendEntriesRequest)  returns (AppendEntriesResponse);
+
+  // RequestVote is used by candidates during an election to request votes from peers.
+  // Each server will vote for at most one candidate in a given term.
   rpc RequestVote     (RequestVoteRequest)    returns (RequestVoteResponse);
+
+  // InstallSnapshot is used to transfer a snapshot of the state machine to followers
+  // who are too far behind and need to catch up quickly.
   rpc InstallSnapshot (InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
 ```
