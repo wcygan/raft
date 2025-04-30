@@ -1,0 +1,1 @@
+Read all of the rules in `.cursor/rules/` to understand how to proceed.
