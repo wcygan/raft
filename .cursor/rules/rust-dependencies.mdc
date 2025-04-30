@@ -39,3 +39,5 @@ wcygan_raft_community_neoeinstein-prost = { workspace = true }
 ```
 
 Cargo will then use the version specified in the root `Cargo.toml`'s `[workspace.dependencies]` section, ensuring consistency across the project. You do not need to specify the version again in the individual crate's `Cargo.toml`.
+
+You MUST NOT specify versions in individual crates; always inherit from [Cargo.toml](mdc:Cargo.toml).
