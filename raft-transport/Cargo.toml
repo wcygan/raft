@@ -1,5 +1,5 @@
 [package]
-name = "raft-grpc"
+name = "raft-transport"
 version = "0.1.0"
 edition = "2024"
 

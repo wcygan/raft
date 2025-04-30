@@ -556,18 +556,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "raft-grpc"
-version = "0.1.0"
-dependencies = [
- "wcygan_raft_community_neoeinstein-prost",
- "wcygan_raft_community_neoeinstein-tonic",
-]
-
-[[package]]
 name = "raft-storage"
 version = "0.1.0"
 dependencies = [
  "wcygan_raft_community_neoeinstein-prost",
+]
+
+[[package]]
+name = "raft-transport"
+version = "0.1.0"
+dependencies = [
+ "wcygan_raft_community_neoeinstein-prost",
+ "wcygan_raft_community_neoeinstein-tonic",
 ]
 
 [[package]]

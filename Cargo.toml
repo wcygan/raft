@@ -2,7 +2,7 @@
 
 members = [
     "raft-core",
-    "raft-grpc",
+    "raft-transport",
     "raft-storage",
     "examples/cluster-demo",
 ]

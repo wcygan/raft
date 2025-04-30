@@ -11,7 +11,7 @@ The project is structured as a Rust workspace with the following components:
 raft/
 ├── Cargo.toml (workspace)
 ├── raft-core/    (consensus algorithm)
-├── raft-grpc/    (network transport)
+├── raft-transport/    (network transport)
 ├── raft-storage/ (persistence layer)
 └── examples/     (demo applications)
 ```
@@ -241,7 +241,7 @@ async fn test_vote_request_handling() {
 Test interactions between components:
 
 - Verify interactions between `raft-core` and specific `Storage` or `Transport` implementations (e.g., in-memory versions).
-- Test the `raft-grpc` layer for correct serialization/deserialization and RPC handling, potentially using loopback connections.
+- Test the `raft-transport` layer for correct serialization/deserialization and RPC handling, potentially using loopback connections.
 
 ```rust
 #[tokio::test]
