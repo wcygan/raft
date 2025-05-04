@@ -1,0 +1,21 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Default Rule Settings
+
+When creating new Cursor rules (`.mdc` files in `.cursor/rules`), ensure the `alwaysApply` field in the frontmatter metadata is set to `true` by default, unless there is a specific reason for the rule to be conditional.
+
+Example:
+```
+---
+description: "Description of the rule"
+globs: ["*.rs"] # Optional glob patterns
+alwaysApply: true # Default this to true
+---
+
+Rule content goes here...
+```
+
+This helps ensure that important project context and guidelines are consistently available to the AI assistant.
