@@ -1,0 +1,30 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Prefer Focused Tests
+
+When writing tests (unit tests, integration tests), strive to create multiple, focused tests rather than single, large tests that cover many different scenarios or assertions.
+
+**Rationale:**
+
+*   **Clarity:** Focused tests make it immediately clear what specific behavior or scenario is being tested.
+*   **Debugging:** When a focused test fails, the scope of the problem is much smaller, making debugging significantly easier and faster. A failure in a large test might require deciphering which of the many assertions or conditions caused the issue.
+*   **Isolation:** Smaller tests are less likely to have unintended interactions or dependencies between different parts of the test logic.
+*   **Readability:** Short, targeted tests are generally easier to read and understand.
+
+**Example:**
+
+Instead of one large test like `test_storage_operations()` that tests `append`, `read`, `truncate_prefix`, and `truncate_suffix` all together, create separate tests:
+
+*   `test_storage_append_single()`
+*   `test_storage_append_multiple()`
+*   `test_storage_read_existing_entry()`
+*   `test_storage_read_missing_entry()`
+*   `test_storage_truncate_prefix_basic()`
+*   `test_storage_truncate_prefix_empty()`
+*   `test_storage_truncate_suffix_middle()`
+*   `test_storage_truncate_suffix_all()`
+
+While some setup might be repeated, the benefits in clarity and maintainability outweigh the duplication, especially when using helper functions for setup. Refer to existing tests like those in [`raft-storage/src/lib.rs`](mdc:raft-storage/src/lib.rs) or [`raft-transport/tests/integration_test.rs`](mdc:raft-transport/tests/integration_test.rs) which generally follow this principle.
