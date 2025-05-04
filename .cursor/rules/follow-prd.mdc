@@ -1,0 +1,12 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Follow Project Requirements
+
+When providing assistance, generating code, or making decisions about the project's direction, always refer to the Project Requirements Document (PRD).
+
+Ensure your suggestions and actions align with the goals, scope, and constraints defined in:
+
+*   [docs/PRD.md](mdc:docs/PRD.md)
