@@ -1,0 +1,17 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Follow Implementation Plan
+
+When developing features or writing code for this project, always adhere to the phased approach outlined in the implementation plan.
+
+Refer to the plan for:
+
+*   The sequence of implementation steps.
+*   The scope of each phase.
+*   The specified testing strategies.
+*   Notes on areas for future expansion (🚧 Future Depth).
+
+The plan is documented in: [PLAN.md](mdc:docs/PLAN.md)
