@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Avoid AI Change Comments
+
+When modifying code, please do not add comments that merely describe the change you just made (e.g., `# Changed variable name`, `// Added error handling`). Assume the commit history and diff will document the specific changes.
+
+Focus comments on *why* a particular design choice was made or explaining complex logic, not *what* was changed by the AI edit itself.

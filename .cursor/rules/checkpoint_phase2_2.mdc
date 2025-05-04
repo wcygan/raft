@@ -1,0 +1,39 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Checkpoint: Phase 2.2 Summary and Next Steps
+
+**Completed (Phase 2.2)**
+
+*   **Mock Transport (`raft-transport` crate):** Implemented `MockTransport` in [`raft-transport/src/mock.rs`](mdc:raft-transport/src/mock.rs) using Tokio MPSC and oneshot channels to simulate an in-process network. This implementation provides a concrete, testable version of the `Transport` trait defined in `raft-core`. Key features include:
+    *   Channel-based request/response handling for AppendEntries and RequestVote.
+    *   Shared `TransportRegistry` ([`raft-transport/src/mock.rs`](mdc:raft-transport/src/mock.rs)) for peer discovery within a test context, enabling concurrent testing.
+    *   Network simulation options (`NetworkOptions` in [`raft-transport/src/network.rs`](mdc:raft-transport/src/network.rs)) for delay, loss, and partitions.
+    *   Automatic cleanup via the `Drop` trait.
+*   **Integration Tests:** Developed and successfully passed a comprehensive suite of integration tests within [`raft-transport/tests/integration_test.rs`](mdc:raft-transport/tests/integration_test.rs) covering:
+    *   Basic send/receive operations.
+    *   Handling of non-existent peers.
+    *   Simulation of network partitions (one-way and healing).
+    *   Simulation of message delays.
+    *   Simulation of message loss.
+    *   Concurrent send operations from multiple tasks.
+*   **Quality Standards:** Verified that `cargo check --workspace`, `cargo fmt --all`, and `cargo test --workspace` all pass successfully, meeting the requirements outlined in [checkpoint-quality](mdc:.cursor/rules/checkpoint-quality.mdc).
+
+Refer to [docs/PLAN.md](mdc:docs/PLAN.md) for details.
+
+---
+
+**Next focus (Phase 3)**
+
+1.  **Raft Core Logic (`raft-core` crate):** Implement the core Raft state machine logic, focusing initially on **Leader Election**:
+    *   Follower, Candidate, and Leader state representations.
+    *   Election timer implementation (using Tokio time).
+    *   Handling of `RequestVote` RPCs (receiving requests and sending responses).
+    *   State transitions based on votes received and timer expirations.
+2.  **Unit Tests:** Write unit tests for the state machine transitions using the mock storage and transport components.
+3.  **Integration Tests:** Develop integration tests using the `MockTransport` to verify that a small cluster (e.g., 3 nodes) can successfully elect a single leader.
+4.  **Deterministic Cluster Tests:** Start setting up or using a deterministic test harness to control timers and ensure reproducible election scenarios.
+
+Use this checkpoint to guide the implementation of the leader election logic within the `raft-core` crate.
