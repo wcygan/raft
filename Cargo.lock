@@ -411,9 +411,13 @@ dependencies = [
  "bytes",
  "futures",
  "prost",
+ "raft-storage",
+ "raft-transport",
  "serde",
+ "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wcygan_raft_community_neoeinstein-prost",
 ]
 

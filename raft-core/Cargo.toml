@@ -16,9 +16,16 @@ bytes = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Add tokio for async runtime in tests
-tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 # Add prost for protobuf (de)serialization in tests
 prost = { workspace = true }
+raft-transport = { path = "../raft-transport" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+raft-storage = { path = "../raft-storage" }
+
+[features]

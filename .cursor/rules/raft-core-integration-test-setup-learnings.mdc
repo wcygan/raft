@@ -1,0 +1,30 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Raft Core Integration Test Setup Learnings
+
+When writing integration tests for `raft-core` (e.g., in [`raft-core/tests/election_test.rs`](mdc:raft-core/tests/election_test.rs)), keep the following points in mind to avoid common setup issues:
+
+1.  **Core Type Imports:**
+    *   Core Raft types like `Config`, `NodeId`, `RaftNode`, `Role`, `Storage`, and `Transport` are defined directly at the root of the `raft_core` crate ([`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs)).
+    *   Import them directly: `use raft_core::{Config, NodeId, ...};`. Do **not** use non-existent submodules like `raft_core::node`.
+
+2.  **Storage Implementation:**
+    *   The `MockStorage` defined within [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs) is located inside the `mod tests { ... }` block and is **private** to that module. It cannot be used directly in external integration tests (`raft-core/tests/`).
+    *   **Solution:** Use the public `InMemoryStorage` implementation provided by the `raft-storage` crate ([`raft-storage/src/lib.rs`](mdc:raft-storage/src/lib.rs)). This requires adding `raft-storage` to the `[dev-dependencies]` section in [`raft-core/Cargo.toml`](mdc:raft-core/Cargo.toml).
+
+3.  **Transport Implementation (`MockTransport`):**
+    *   Use the `MockTransport` and `TransportRegistry` provided by the `raft-transport` crate ([`raft-transport/src/lib.rs`](mdc:raft-transport/src/lib.rs) and [`raft-transport/src/mock.rs`](mdc:raft-transport/src/mock.rs)). This requires adding `raft-transport` to `[dev-dependencies]` in [`raft-core/Cargo.toml`](mdc:raft-core/Cargo.toml).
+    *   **Instantiation:**
+        *   Create the registry first: `let registry = TransportRegistry::new();` (This returns an `Arc<TransportRegistry>`).
+        *   Create the transport using the **async** function: `let (transport, _receivers) = MockTransport::create_with_options(node_id, NetworkOptions::default(), registry.clone()).await;`.
+        *   **Arguments:** Note the order: `node_id`, `NetworkOptions`, `Arc<TransportRegistry>`.
+        *   Remember to `.await` the call and destructure the resulting tuple.
+
+4.  **Dependencies:**
+    *   Ensure all necessary crates (`raft-storage`, `raft-transport`, `tokio`, `tracing`, etc.) are listed under `[dev-dependencies]` in [`raft-core/Cargo.toml`](mdc:raft-core/Cargo.toml) for the integration tests to compile.
+
+5.  **Compiler/Linter Discrepancies:**
+    *   Occasionally, the compiler or linter might report type mismatches that seem incorrect (e.g., regarding `Arc<TransportRegistry>`). Following compiler suggestions like using `.into()` can sometimes resolve these, even if the underlying reason isn't immediately clear. If errors persist, consider `cargo clean` before further debugging.
