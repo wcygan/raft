@@ -1,0 +1,28 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Checkpoint: Phase 2.1 Summary and Next Steps
+
+**Completed (Phase 2.1)**
+
+*   **In-Memory Storage (`raft-storage` crate):** Implemented `InMemoryStorage` in [`raft-storage/src/lib.rs`](mdc:raft-storage/src/lib.rs), providing a concrete, testable implementation of the `Storage` trait defined in `raft-core`.
+*   **Unit Tests:** Developed and successfully passed a comprehensive suite of unit tests within [`raft-storage/src/lib.rs`](mdc:raft-storage/src/lib.rs) covering:
+    *   Hard state read/write.
+    *   Log entry append (single, multiple, overwrite, gap detection).
+    *   Log entry read (single, range).
+    *   Log truncation (prefix and suffix, including edge cases like empty log, truncation past boundaries, and absolute index handling).
+    *   Last log index/term retrieval.
+*   **Quality Standards:** Verified that `cargo check --workspace`, `cargo fmt --all`, and `cargo test --workspace` all pass successfully, meeting the requirements outlined in [checkpoint-quality](mdc:.cursor/rules/checkpoint-quality.mdc).
+
+Refer to [docs/PLAN.md](mdc:docs/PLAN.md) for details.
+
+---
+
+**Next focus (Phase 2.2)**
+
+1.  **Mock Transport (`raft-transport` crate):** Implement a Tokio channel–based transport to simulate RPCs between Raft nodes.
+2.  **Integration Tests:** Write integration tests for the mock transport to verify message delivery, ordering, and potentially simulate network partitions or delays (as specified in the plan).
+
+Use this checkpoint to guide the implementation of the `raft-transport` crate.
