@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 wcygan_raft_community_neoeinstein-prost = { workspace = true }
+prost = { workspace = true }
 # Add async-trait for async methods in traits
 async-trait = "0.1"
 # Add anyhow for error handling in trait methods
@@ -15,3 +16,5 @@ tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 [dev-dependencies]
 # Add tokio for async runtime in tests
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+# Add prost for protobuf (de)serialization in tests
+prost = { workspace = true }

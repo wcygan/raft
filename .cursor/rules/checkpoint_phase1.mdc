@@ -1,0 +1,23 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Checkpoint: Phase 0–1 Summary and Next Steps
+
+**Completed so far (Phases 0–1)**
+
+- **Phase 0**: Set up Cargo workspace skeleton (`raft-core`, `raft-storage`, `raft-transport`, `examples`) and CI pipeline (GitHub Actions with fmt, clippy, test).
+- **Phase 1.1**: Defined core types in `raft-core` (`NodeId`, `LogEntry`, `HardState`, etc.) and generated Rust code from `proto/raft/v1/raft.proto`.
+- **Phase 1.2**: Drafted and implemented **`Storage`** and **`Transport`** traits in `raft-core/src/lib.rs`, with in-memory mock implementations and unit tests.
+
+Refer to [docs/PLAN.md](mdc:docs/PLAN.md) for details.
+
+---
+
+**Next focus (Phase 2)**
+
+1. **In-Memory Storage** (`raft-storage` crate): Implement a simple `Vec<LogEntry>` + `HashMap` persistence backend, and write unit tests to validate append/read/truncate semantics.
+2. **Mock Transport** (`raft-transport` crate): Implement a Tokio channel–based transport to simulate RPCs, and write integration tests for message ordering and reliability scenarios.
+
+Use this checkpoint to guide the upcoming implementation tasks and test suites.

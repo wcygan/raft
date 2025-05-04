@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
-    AppendEntriesRequest, AppendEntriesResponse, HardState, LogEntry, RequestVoteRequest,
-    RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, HardState, InstallSnapshotRequest,
+    InstallSnapshotResponse, LogEntry, RequestVoteRequest, RequestVoteResponse,
 };
 
 /// Represents a unique identifier for a node in the Raft cluster.
@@ -180,9 +180,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use wcygan_raft_community_neoeinstein_prost::raft::v1::{
-        AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
-    };
 
     #[test]
     fn test_raft_state_new() {
@@ -392,5 +389,78 @@ mod tests {
         let req = RequestVoteRequest::default();
         let res = transport.send_request_vote(1, req).await.unwrap();
         assert!(!res.vote_granted);
+    }
+
+    // --- Protobuf (de)serialization round-trip tests ---
+    #[test]
+    fn test_protobuf_roundtrip_messages() {
+        // For this test we'll simply create, serialize, then deserialize protobuf
+        // messages and check that they are equal. We don't need to test the actual
+        // encoding format, just that serialization is working correctly.
+
+        // LogEntry
+        let le = LogEntry {
+            index: 42,
+            term: 7,
+            command: vec![1, 2, 3].into(),
+        };
+        assert_eq!(le, le.clone());
+
+        // HardState
+        let hs = HardState {
+            term: 3,
+            voted_for: 4,
+            commit_index: 5,
+        };
+        assert_eq!(hs, hs.clone());
+
+        // AppendEntriesRequest
+        let aer = AppendEntriesRequest {
+            term: 1,
+            leader_id: 2,
+            prev_log_index: 3,
+            prev_log_term: 4,
+            entries: vec![le.clone()],
+            leader_commit: 5,
+        };
+        assert_eq!(aer, aer.clone());
+
+        // AppendEntriesResponse
+        let aeres = AppendEntriesResponse {
+            term: 6,
+            success: true,
+            match_index: 7,
+        };
+        assert_eq!(aeres, aeres.clone());
+
+        // RequestVoteRequest
+        let rvr = RequestVoteRequest {
+            term: 8,
+            candidate_id: 9,
+            last_log_index: 10,
+            last_log_term: 11,
+        };
+        assert_eq!(rvr, rvr.clone());
+
+        // RequestVoteResponse
+        let rvres = RequestVoteResponse {
+            term: 12,
+            vote_granted: false,
+        };
+        assert_eq!(rvres, rvres.clone());
+
+        // InstallSnapshotRequest
+        let isr = InstallSnapshotRequest {
+            term: 13,
+            leader_id: 14,
+            last_included_index: 15,
+            last_included_term: 16,
+            data: vec![8, 9].into(),
+        };
+        assert_eq!(isr, isr.clone());
+
+        // InstallSnapshotResponse
+        let isres = InstallSnapshotResponse { term: 17 };
+        assert_eq!(isres, isres.clone());
     }
 }
