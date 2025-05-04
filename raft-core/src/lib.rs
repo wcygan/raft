@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use prost::Message;
 use std::collections::HashMap;
 
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
@@ -394,17 +395,15 @@ mod tests {
     // --- Protobuf (de)serialization round-trip tests ---
     #[test]
     fn test_protobuf_roundtrip_messages() {
-        // For this test we'll simply create, serialize, then deserialize protobuf
-        // messages and check that they are equal. We don't need to test the actual
-        // encoding format, just that serialization is working correctly.
-
         // LogEntry
         let le = LogEntry {
             index: 42,
             term: 7,
             command: vec![1, 2, 3].into(),
         };
-        assert_eq!(le, le.clone());
+        let buf = le.encode_to_vec();
+        let decoded = LogEntry::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, le);
 
         // HardState
         let hs = HardState {
@@ -412,7 +411,9 @@ mod tests {
             voted_for: 4,
             commit_index: 5,
         };
-        assert_eq!(hs, hs.clone());
+        let buf = hs.encode_to_vec();
+        let decoded = HardState::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, hs);
 
         // AppendEntriesRequest
         let aer = AppendEntriesRequest {
@@ -423,7 +424,9 @@ mod tests {
             entries: vec![le.clone()],
             leader_commit: 5,
         };
-        assert_eq!(aer, aer.clone());
+        let buf = aer.encode_to_vec();
+        let decoded = AppendEntriesRequest::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, aer);
 
         // AppendEntriesResponse
         let aeres = AppendEntriesResponse {
@@ -431,7 +434,9 @@ mod tests {
             success: true,
             match_index: 7,
         };
-        assert_eq!(aeres, aeres.clone());
+        let buf = aeres.encode_to_vec();
+        let decoded = AppendEntriesResponse::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, aeres);
 
         // RequestVoteRequest
         let rvr = RequestVoteRequest {
@@ -440,14 +445,18 @@ mod tests {
             last_log_index: 10,
             last_log_term: 11,
         };
-        assert_eq!(rvr, rvr.clone());
+        let buf = rvr.encode_to_vec();
+        let decoded = RequestVoteRequest::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, rvr);
 
         // RequestVoteResponse
         let rvres = RequestVoteResponse {
             term: 12,
             vote_granted: false,
         };
-        assert_eq!(rvres, rvres.clone());
+        let buf = rvres.encode_to_vec();
+        let decoded = RequestVoteResponse::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, rvres);
 
         // InstallSnapshotRequest
         let isr = InstallSnapshotRequest {
@@ -457,10 +466,14 @@ mod tests {
             last_included_term: 16,
             data: vec![8, 9].into(),
         };
-        assert_eq!(isr, isr.clone());
+        let buf = isr.encode_to_vec();
+        let decoded = InstallSnapshotRequest::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, isr);
 
         // InstallSnapshotResponse
         let isres = InstallSnapshotResponse { term: 17 };
-        assert_eq!(isres, isres.clone());
+        let buf = isres.encode_to_vec();
+        let decoded = InstallSnapshotResponse::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, isres);
     }
 }

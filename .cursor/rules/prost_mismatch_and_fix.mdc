@@ -1,0 +1,38 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Prost Version Alignment Rule
+
+When writing (de)serialization tests for Protobuf messages, ensure that the `prost` runtime version matches the version used by your generated code. A mismatch leads to "no method named `encode_to_vec`" errors because multiple versions of `prost` get pulled into the dependency graph.
+
+What went wrong:
+
+- We added `prost = { workspace = true }` with version `0.11` in `raft-core/Cargo.toml`, but the generated code from `wcygan_raft_community_neoeinstein-prost` was built against `prost` **0.13.1**.
+- This version skew caused the `Message` trait in scope to be from `prost 0.11`, so methods like `encode_to_vec` and `decode` (defined in `prost 0.13.1`) were not found.
+
+How to proceed correctly:
+
+1. In the root [`Cargo.toml`](mdc:Cargo.toml), set:
+   ```toml
+   [workspace.dependencies]
+   prost = "0.13.1"
+   ```
+2. In each crate's `Cargo.toml` (e.g. `raft-core/Cargo.toml`), use the workspace version:
+   ```toml
+   [dependencies]
+   prost = { workspace = true }
+   ```
+3. In your Rust files (e.g. [raft-core/src/lib.rs](mdc:raft-core/src/lib.rs)), import the correct trait:
+   ```rust
+   use prost::Message;
+   ```
+4. Write true round-trip tests using `encode_to_vec()` and `Message::decode()`:
+   ```rust
+   let buf = my_message.encode_to_vec();
+   let decoded = MyMessage::decode(buf.as_slice()).unwrap();
+   assert_eq!(decoded, my_message);
+   ```
+
+Following this ensures only one version of `prost` is in your graph, and that all generated types can access the full `Message` API for serialization and deserialization.
