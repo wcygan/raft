@@ -1,0 +1,55 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Async Closures (`async || { ... }`)
+
+Rust 1.85.0 introduced **async closures** using the `async || { ... }` syntax.
+
+## Key Features:
+
+1.  **Returns a Future:** Like `async fn`, an async closure returns a future when called.
+2.  **Captures Environment:** It can capture variables from its surrounding scope, similar to regular closures.
+3.  **Borrowing from Captures:** Unlike the `|| async { ... }` pattern, futures returned by `async ||` closures *can* borrow from the captured environment.
+
+    ```rust
+    use std::future::ready;
+
+    async fn example() {
+        let mut vec: Vec<String> = vec![];
+
+        // This works because the future returned by the async closure
+        // can borrow `vec`.
+        let closure = async || {
+            vec.push(ready(String::from("")).await);
+        };
+
+        // Calling the closure returns a future
+        closure().await;
+    }
+    ```
+
+4.  **`AsyncFn` Traits:** Accompanied by new traits (`AsyncFn`, `AsyncFnMut`, `AsyncFnOnce`) which allow expressing higher-ranked bounds over functions returning futures more easily than with `Fn(...) -> impl Future`.
+
+    ```rust
+    use core::future::Future;
+
+    // Harder to express correctly with Fn + Future
+    async fn f<Fut>(_: impl for<'a> Fn(&'a u8) -> Fut)
+    where
+        Fut: Future<Output = ()>,
+    { todo!() }
+
+    // Easier with AsyncFn
+    async fn f2(_: impl for<'a> core::ops::AsyncFn(&'a u8))
+    { todo!() }
+
+    async fn usage() {
+        async fn g(_: &u8) { todo!() }
+        // f(g).await; // Compile error (lifetime mismatch)
+        f2(g).await; // OK
+    }
+    ```
+
+Use `async || { ... }` when you need an asynchronous operation that captures its environment, especially if the operation needs to borrow captured variables.

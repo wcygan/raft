@@ -1,0 +1,18 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Rust 2024 Edition Highlights
+
+This project uses the **Rust 2024 Edition** (stabilized in Rust 1.85.0). Key changes and considerations include:
+
+*   **Language:**
+    *   **RPIT Lifetime Capture:** Changes to default lifetime capturing in `impl Trait`.
+    *   **Temporary Scopes:** Adjustments to temporary variable scopes in `if let` and block tail expressions.
+    *   **`unsafe` Requirements:** `extern` blocks now require `unsafe`. Attributes like `#[link_section]` require `unsafe`. Calls within `unsafe fn` require explicit `unsafe {}` blocks (warn-by-default initially, error in 2024).
+    *   **`gen` Keyword:** Reserved for future use (generators).
+    *   **Prelude Changes:** `Future` and `IntoFuture` are now in the prelude.
+*   **Cargo:**
+    *   **Resolver:** The default dependency resolver considers the `rust-version` field.
+*   **Migration:** `cargo fix --edition` can help automate transitions, but review changes as it prioritizes preserving old behavior.
