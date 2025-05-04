@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
@@ -178,7 +178,7 @@ pub trait Transport {
 
 /// The main Raft node structure, encapsulating state and logic.
 /// Generic over Storage and Transport implementations.
-pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Send + Sync + 'static> {
+pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 'static> {
     /// The ID of the node
     pub id: NodeId,
     /// The current state of the Raft node
@@ -189,6 +189,281 @@ pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Send + Sy
     pub storage: S,
     /// The transport layer for sending and receiving messages
     pub transport: T,
+    // TODO: Add internal state like election/heartbeat timers
+    /// Tracks votes received during a candidacy period.
+    votes_received: HashSet<NodeId>,
+}
+
+impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 'static> RaftNode<S, T> {
+    /// Creates a new RaftNode.
+    pub fn new(id: NodeId, config: Config, storage: S, transport: T) -> Self {
+        let state = RaftState::new(id);
+        // TODO: Load persisted state from storage
+        // TODO: Initialize timers (election timeout)
+        Self {
+            id,
+            state,
+            config,
+            storage,
+            transport,
+            votes_received: HashSet::new(), // Initialize votes_received
+        }
+    }
+
+    /// Transitions the node to the Follower state.
+    async fn become_follower(&mut self, term: u64, leader_id: Option<NodeId>) -> Result<()> {
+        tracing::info!(node_id = %self.id, old_term = self.state.hard_state.term, new_term = term, ?leader_id, "Transitioning to Follower");
+        self.state.hard_state.term = term;
+        self.state.hard_state.voted_for = 0; // Clear vote when becoming follower
+        self.state.server.role = Role::Follower;
+        self.state.server.leader_id = leader_id;
+        self.votes_received.clear(); // Clear any votes from previous candidacy
+        // Persist the updated HardState
+        self.storage.save_hard_state(&self.state.hard_state).await?;
+        // TODO: Reset election timer
+        Ok(())
+    }
+
+    /// Transitions the node to the Candidate state.
+    async fn become_candidate(&mut self) -> Result<()> {
+        let new_term = self.state.hard_state.term + 1;
+        tracing::info!(node_id = %self.id, old_term = self.state.hard_state.term, new_term, "Transitioning to Candidate");
+        self.state.hard_state.term = new_term;
+        self.state.hard_state.voted_for = self.id; // Vote for self
+        self.state.server.role = Role::Candidate;
+        self.state.server.leader_id = None;
+
+        // Clear previous votes and add self-vote
+        self.votes_received.clear();
+        self.votes_received.insert(self.id);
+
+        // Persist the updated HardState
+        self.storage.save_hard_state(&self.state.hard_state).await?;
+        // TODO: Reset election timer
+        Ok(())
+    }
+
+    /// Transitions the node to the Leader state.
+    async fn become_leader(&mut self) -> Result<()> {
+        tracing::info!(node_id = %self.id, term = self.state.hard_state.term, "Transitioning to Leader");
+        if self.state.server.role != Role::Candidate {
+            tracing::warn!(node_id = %self.id, current_role = ?self.state.server.role, "Attempted to become leader from non-candidate state");
+            // Depending on stricter state machine, could return Err or just log
+        }
+        self.state.server.role = Role::Leader;
+        self.state.server.leader_id = Some(self.id);
+        self.votes_received.clear(); // Clear votes after winning election
+
+        // Initialize leader-specific state (next_index, match_index)
+        let last_log_index = self.storage.last_log_index().await?;
+        self.state.leader.next_index.clear();
+        self.state.leader.match_index.clear();
+        for &peer_id in &self.config.peers {
+            if peer_id != self.id {
+                // Don't track self
+                self.state
+                    .leader
+                    .next_index
+                    .insert(peer_id, last_log_index + 1);
+                self.state.leader.match_index.insert(peer_id, 0);
+            }
+        }
+
+        // No change to HardState needed specifically for becoming leader (term/vote handled by candidate transition)
+        // TODO: Send initial empty AppendEntries (heartbeat) to peers
+        // TODO: Reset heartbeat timer(s)
+        Ok(())
+    }
+
+    /// Handles an election timeout.
+    pub async fn handle_election_timeout(&mut self) -> Result<()> {
+        // Leaders and Candidates should not start new elections on election timeout
+        if self.state.server.role == Role::Leader {
+            tracing::debug!(node_id = %self.id, term = self.state.hard_state.term, "Already leader, ignoring election timeout.");
+            return Ok(());
+        }
+        // If already a candidate, just restart the election for the same term (potentially)
+        // Though typically a new timeout implies starting a new election term.
+        // Let's proceed with becoming candidate, which handles term increment.
+
+        tracing::info!(node_id = %self.id, term = self.state.hard_state.term, "Election timeout triggered, starting election.");
+
+        // 1. Increment currentTerm, transition to Candidate state
+        self.become_candidate().await?; // Handles term increment, voting for self, state persistence
+
+        // TODO: Reset election timer
+
+        // 2. Issue RequestVote RPCs in parallel to all other servers
+        let current_term = self.state.hard_state.term;
+        let last_log_index = self.storage.last_log_index().await?;
+        let last_log_term = self.storage.last_log_term().await?;
+
+        let request = RequestVoteRequest {
+            term: current_term,
+            candidate_id: self.id,
+            last_log_index,
+            last_log_term,
+        };
+
+        let mut vote_tasks = Vec::new();
+        for &peer_id in &self.config.peers {
+            if peer_id == self.id {
+                continue; // Don't send RPC to self
+            }
+            let transport = self.transport.clone(); // Clone transport for concurrent use
+            let request = request.clone(); // Clone request for each task
+            let node_id = self.id;
+            
+            // Spawn a task for each vote request
+            vote_tasks.push(tokio::spawn(async move {
+                tracing::debug!(%node_id, %peer_id, term = request.term, "Sending RequestVote RPC");
+                match transport.send_request_vote(peer_id, request).await {
+                    Ok(response) => {
+                        tracing::debug!(%node_id, %peer_id, ?response, "Received RequestVote response");
+                        Some((peer_id, response))
+                    }
+                    Err(e) => {
+                        tracing::warn!(%node_id, %peer_id, error = %e, "Failed to send RequestVote RPC");
+                        None
+                    }
+                }
+            }));
+        }
+
+        // 3. Tally votes
+        let mut granted_votes_count = self.votes_received.len(); // Start with self-vote
+        let required_votes = (self.config.peers.len() / 2) + 1; // Integer division automatically floors
+
+        for task in vote_tasks {
+            // Ensure we only process results if still a candidate in the same term
+            if self.state.server.role != Role::Candidate || self.state.hard_state.term != current_term {
+                 tracing::info!(node_id = %self.id, term = self.state.hard_state.term, role = ?self.state.server.role, election_term = current_term, "State changed during election, aborting vote count.");
+                 // Potentially cancel remaining tasks if possible/needed
+                 break; 
+            }
+
+            if let Ok(Some((peer_id, response))) = task.await {
+                // Check if peer's term is higher, if so, step down
+                if response.term > self.state.hard_state.term {
+                    tracing::info!(node_id = %self.id, peer_id, peer_term = response.term, "Discovered higher term from vote response, stepping down.");
+                    self.become_follower(response.term, None).await?; // leader_id unknown
+                    // Stop tallying votes as we are no longer a candidate in this term
+                    return Ok(()); 
+                }
+                
+                // If terms match and vote granted, record it
+                if response.term == current_term && response.vote_granted {
+                    tracing::debug!(node_id = %self.id, peer_id, "Vote granted");
+                    if self.votes_received.insert(peer_id) {
+                        granted_votes_count += 1;
+                    }
+                    
+                    // Check for majority
+                    if granted_votes_count >= required_votes {
+                        tracing::info!(node_id = %self.id, term = current_term, votes = granted_votes_count, required = required_votes, "Election won, becoming leader.");
+                        self.become_leader().await?;
+                        // Stop tallying votes as we've won
+                        return Ok(());
+                    }
+                }
+            }
+            // Handle task error (e.g., panic) if needed, though spawn captures it
+        }
+
+        // If loop finishes without becoming leader (e.g., split vote, network issues, stepped down)
+        // The node remains a Candidate (or became Follower) and will eventually time out again.
+        tracing::debug!(node_id = %self.id, term = current_term, role = ?self.state.server.role, votes = granted_votes_count, required = required_votes, "Election round finished.");
+
+        Ok(())
+    }
+
+    /// Handles a heartbeat timeout (specific to leaders).
+    pub async fn handle_heartbeat_timeout(&mut self) -> Result<()> {
+        // TODO: Implement heartbeat logic (send AppendEntries to peers)
+        tracing::debug!(node_id = %self.id, term = self.state.hard_state.term, "Heartbeat timeout triggered");
+        Ok(())
+    }
+
+    /// Handles an incoming RequestVote RPC.
+    pub async fn handle_request_vote(
+        &mut self,
+        request: RequestVoteRequest,
+    ) -> Result<RequestVoteResponse> {
+        tracing::debug!(node_id = %self.id, current_term = self.state.hard_state.term, ?request, "Handling RequestVote RPC");
+
+        let mut vote_granted = false;
+        let current_term = self.state.hard_state.term;
+
+        // 1. Reply false if term < currentTerm (§5.1)
+        if request.term < current_term {
+            tracing::debug!(node_id = %self.id, "Rejecting vote: Request term {} < current term {}", request.term, current_term);
+            return Ok(RequestVoteResponse {
+                term: current_term,
+                vote_granted: false,
+            });
+        }
+
+        // 2. If RPC request contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+        if request.term > current_term {
+            tracing::info!(node_id = %self.id, "Received higher term {} from candidate {}. Stepping down.", request.term, request.candidate_id);
+            self.become_follower(request.term, None).await?; 
+            // HardState is persisted within become_follower
+            // Proceed to voting check below with the updated term
+        }
+
+        // Now, self.state.hard_state.term == request.term
+        let current_voted_for = self.state.hard_state.voted_for;
+        let log_ok = self.is_log_up_to_date(request.last_log_term, request.last_log_index).await?;
+
+        // 3. Grant vote if votedFor is null or candidateId, and candidate's log is at least as up-to-date as receiver's log (§5.2, §5.4)
+        if (current_voted_for == 0 || current_voted_for == request.candidate_id) && log_ok {
+            tracing::info!(node_id = %self.id, term = self.state.hard_state.term, candidate_id = request.candidate_id, "Granting vote");
+            vote_granted = true;
+            self.state.hard_state.voted_for = request.candidate_id;
+            // Persist the vote decision
+            self.storage.save_hard_state(&self.state.hard_state).await?;
+            // TODO: If vote granted, reset election timer here as well
+        } else {
+            tracing::debug!(node_id = %self.id, term = self.state.hard_state.term, candidate_id = request.candidate_id, current_voted_for, log_ok, "Rejecting vote: Already voted or log not up-to-date");
+        }
+
+        Ok(RequestVoteResponse {
+            term: self.state.hard_state.term, // Use potentially updated term
+            vote_granted,
+        })
+    }
+
+    /// Checks if the candidate's log (represented by last_log_term and last_log_index)
+    /// is at least as up-to-date as this node's log. (§5.4.1)
+    async fn is_log_up_to_date(&self, candidate_last_log_term: u64, candidate_last_log_index: u64) -> Result<bool> {
+        let my_last_log_term = self.storage.last_log_term().await?;
+        let my_last_log_index = self.storage.last_log_index().await?;
+
+        let log_ok = 
+            // Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in the logs.
+            // If the logs have last entries with different terms, then the log with the later term is more up-to-date. 
+            candidate_last_log_term > my_last_log_term ||
+            // If the logs end with the same term, then whichever log is longer is more up-to-date.
+            (candidate_last_log_term == my_last_log_term && candidate_last_log_index >= my_last_log_index);
+        
+        tracing::trace!(node_id = %self.id, candidate_last_log_term, candidate_last_log_index, my_last_log_term, my_last_log_index, log_ok, "Log up-to-date check");
+        Ok(log_ok)
+    }
+
+    /// Handles an incoming AppendEntries RPC.
+    pub async fn handle_append_entries(
+        &mut self,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse> {
+        // TODO: Implement AppendEntries logic (check term, leader, log consistency)
+        tracing::debug!(node_id = %self.id, ?request, "Handling AppendEntries RPC");
+        // Placeholder response
+        Ok(AppendEntriesResponse {
+            term: self.state.hard_state.term,
+            success: false,
+            match_index: 0, // Or appropriate value
+        })
+    }
 }
 
 #[cfg(test)]

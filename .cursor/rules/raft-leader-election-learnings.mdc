@@ -1,0 +1,50 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Raft Leader Election Implementation Learnings (Phase 3 Start)
+
+This rule summarizes the initial implementation of Raft's leader election logic within [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs), covering Phase 3 of the plan.
+
+## Key Components Added:
+
+1.  **`RaftNode` State:**
+    *   Added `votes_received: HashSet<NodeId>` to track votes collected during candidacy.
+
+2.  **State Transition Helpers (`async fn(&mut self)`):**
+    *   `become_follower(term, leader_id)`: Sets role to Follower, updates term, clears `voted_for`, updates leader ID, clears `votes_received`, and persists `HardState`.
+    *   `become_candidate()`: Increments term, sets role to Candidate, votes for self, clears `votes_received` (adding self-vote), clears leader ID, and persists `HardState`.
+    *   `become_leader()`: Sets role to Leader, sets leader ID to self, clears `votes_received`, initializes leader-specific state (`next_index`, `match_index`) based on `last_log_index`. (Note: Assumes transition *from* Candidate state).
+
+3.  **RPC Handler: `handle_request_vote`:**
+    *   Implements Raft rules (§5.1, §5.2, §5.4):
+        *   Rejects requests with lower terms.
+        *   Steps down (`become_follower`) if request has a higher term.
+        *   Grants vote only if `voted_for` is null (0) or matches `candidate_id`, *and* the candidate's log is at least as up-to-date.
+        *   Persists `HardState` if vote is granted.
+    *   Uses helper `is_log_up_to_date(candidate_last_log_term, candidate_last_log_index)` which compares logs based first on term, then on index (§5.4.1).
+
+4.  **Timeout Handler: `handle_election_timeout`:**
+    *   Ignores timeout if already Leader.
+    *   Transitions to Candidate state (`become_candidate`).
+    *   Sends `RequestVote` RPCs concurrently to all peers using `tokio::spawn`.
+        *   Requires `Transport` to be `Clone`.
+    *   Tallies votes received (starting with self-vote).
+    *   Checks for majority (`(peers.len() / 2) + 1`).
+    *   Transitions to Leader (`become_leader`) if majority is achieved.
+    *   Handles discovering higher terms from vote *responses* by stepping down (`become_follower`).
+    *   Aborts vote tallying if state (role or term) changes mid-election.
+
+5.  **Persistence:**
+    *   `HardState` (term, voted_for) is persisted using the `Storage` trait within `become_follower`, `become_candidate`, and `handle_request_vote` (when granting vote).
+
+6.  **Dependencies:**
+    *   Added `std::collections::HashSet` import.
+    *   Added `Clone` trait bound to the `Transport` generic type `T` in `RaftNode` struct definition and `impl` block to support concurrent RPC calls.
+
+## Outstanding TODOs (from comments):
+*   Load persisted state in `RaftNode::new`.
+*   Initialize and reset election/heartbeat timers.
+*   Send initial empty `AppendEntries` upon becoming leader.
+*   Implement `handle_append_entries`.
