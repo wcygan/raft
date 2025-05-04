@@ -1152,7 +1152,105 @@ mod tests {
         assert_eq!(stored_state4.voted_for, 2, "Scenario 4: Persisted voted_for should be 2");
 
         // --- Scenario 5: Reject Vote (Log Not Up-to-Date) --- 
-        // Add this test case separately as it requires log setup
+        let mut node5 = create_test_node(1, vec![1, 2, 3]);
+        node5.state.hard_state.term = 2;
+        let node_log_entries = vec![
+            LogEntry { index: 1, term: 1, command: vec![].into() },
+            LogEntry { index: 2, term: 2, command: vec![].into() }, // Node's log ends at index 2, term 2
+        ];
+        node5.storage.append_log_entries(&node_log_entries).await.unwrap();
+        node5.storage.save_hard_state(&node5.state.hard_state).await.unwrap();
+        
+        // Candidate 1: Same term (2), shorter log (index 1)
+        let request5a = RequestVoteRequest {
+            term: 2, 
+            candidate_id: 2,
+            last_log_index: 1, // Candidate log shorter
+            last_log_term: 2,
+        };
+        let response5a = node5.handle_request_vote(request5a).await.unwrap();
+        assert!(!response5a.vote_granted, "Scenario 5a: Vote should be rejected (candidate log shorter, same term)");
+        assert_eq!(response5a.term, 2);
+        assert_eq!(node5.state.hard_state.voted_for, 0, "Scenario 5a: Should not have voted");
 
+        // Candidate 2: Lower term (1), longer log (index 3)
+        let request5b = RequestVoteRequest {
+            term: 2,
+            candidate_id: 3,
+            last_log_index: 3, 
+            last_log_term: 1, // Candidate log has lower term
+        };
+        let response5b = node5.handle_request_vote(request5b).await.unwrap();
+        assert!(!response5b.vote_granted, "Scenario 5b: Vote should be rejected (candidate log older term)");
+        assert_eq!(response5b.term, 2);
+        assert_eq!(node5.state.hard_state.voted_for, 0, "Scenario 5b: Should still not have voted");
+
+        // Candidate 3: Log is up-to-date (same term, same length)
+        let request5c = RequestVoteRequest {
+            term: 2, 
+            candidate_id: 4,
+            last_log_index: 2,
+            last_log_term: 2,
+        };
+        let response5c = node5.handle_request_vote(request5c).await.unwrap();
+        assert!(response5c.vote_granted, "Scenario 5c: Vote should be granted (log up-to-date)");
+        assert_eq!(response5c.term, 2);
+        assert_eq!(node5.state.hard_state.voted_for, 4, "Scenario 5c: Should have voted for 4");
+    }
+
+    #[tokio::test]
+    async fn test_handle_election_timeout_basic() {
+        // --- Scenario 1: Follower transitions to Candidate --- 
+        let mut node1 = create_test_node(1, vec![1, 2, 3]);
+        node1.state.hard_state.term = 5; // Start at term 5
+        node1.state.server.role = Role::Follower;
+        node1.storage.save_hard_state(&node1.state.hard_state).await.unwrap(); // Save initial term
+
+        // Simulate election timeout
+        node1.handle_election_timeout().await.unwrap();
+
+        // Assertions
+        assert_eq!(node1.state.server.role, Role::Candidate, "Scenario 1: Role should be Candidate");
+        assert_eq!(node1.state.hard_state.term, 6, "Scenario 1: Term should be incremented to 6");
+        assert_eq!(node1.state.hard_state.voted_for, node1.id, "Scenario 1: Should vote for self");
+        assert_eq!(node1.votes_received.len(), 1, "Scenario 1: Should have 1 vote (self)");
+        assert!(node1.votes_received.contains(&node1.id), "Scenario 1: votes_received should contain self");
+        
+        // Verify persistence
+        let stored_state1 = node1.storage.read_hard_state().await.unwrap();
+        assert_eq!(stored_state1.term, 6, "Scenario 1: Persisted term should be 6");
+        assert_eq!(stored_state1.voted_for, node1.id, "Scenario 1: Persisted voted_for should be self");
+
+        // --- Scenario 2: Candidate restarts election (becomes candidate again) --- 
+        // Simulate another timeout while already a candidate in term 6
+        node1.handle_election_timeout().await.unwrap();
+
+        // Assertions: Should start a *new* election in term 7
+        assert_eq!(node1.state.server.role, Role::Candidate, "Scenario 2: Role should remain Candidate");
+        assert_eq!(node1.state.hard_state.term, 7, "Scenario 2: Term should be incremented to 7");
+        assert_eq!(node1.state.hard_state.voted_for, node1.id, "Scenario 2: Should vote for self again in new term");
+        assert_eq!(node1.votes_received.len(), 1, "Scenario 2: Votes should reset to 1 (self)"); 
+        assert!(node1.votes_received.contains(&node1.id));
+
+        // Verify persistence for term 7
+        let stored_state2 = node1.storage.read_hard_state().await.unwrap();
+        assert_eq!(stored_state2.term, 7, "Scenario 2: Persisted term should be 7");
+        assert_eq!(stored_state2.voted_for, node1.id, "Scenario 2: Persisted voted_for should be self");
+
+        // --- Scenario 3: Leader ignores election timeout ---
+        let mut node3 = create_test_node(1, vec![1, 2, 3]);
+        node3.state.hard_state.term = 8;
+        // Use the internal helper directly for setup simplicity in test
+        node3.become_leader().await.unwrap(); // Become leader in term 8
+        let initial_leader_state = node3.state.clone();
+        let initial_stored_state = node3.storage.read_hard_state().await.unwrap();
+
+        // Simulate election timeout
+        node3.handle_election_timeout().await.unwrap();
+
+        // Assertions: State should not change
+        assert_eq!(node3.state, initial_leader_state, "Scenario 3: Leader state should not change");
+        let final_stored_state = node3.storage.read_hard_state().await.unwrap();
+        assert_eq!(final_stored_state, initial_stored_state, "Scenario 3: Leader persisted state should not change");
     }
 }
