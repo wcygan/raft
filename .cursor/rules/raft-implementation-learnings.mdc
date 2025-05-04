@@ -1,0 +1,41 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Raft Implementation Learnings
+
+This document captures important lessons learned during the implementation of the Raft components, particularly regarding storage and transport layers, which are crucial for future phases like leader election.
+
+## Storage (`raft-storage`)
+
+1.  **Absolute vs. Relative Log Indexing:**
+    *   **Key Point:** Raft log indices are *absolute* (1-based) and must be maintained even after prefix truncation ([`raft-storage/src/lib.rs`](mdc:raft-storage/src/lib.rs)).
+    *   **Implication:** Storage operations (`read_log_entry`, `read_log_entries`, `truncate_log_prefix`, `truncate_log_suffix`, `last_log_index`) **must** operate based on the `index` field within `LogEntry`, not `Vec` positions.
+    *   **Example:** The `truncate_log_prefix` implementation was refactored to use `Vec::retain` filtering by absolute index to handle this correctly.
+
+2.  **Testing Edge Cases:**
+    *   Failures often occurred at boundaries (empty log, index 0/1, truncating beyond log end). Test these thoroughly.
+    *   Complex sequences (e.g., truncate prefix then append) can reveal issues not seen in isolated tests.
+
+## Transport (`raft-transport`)
+
+1.  **Concurrency and Cleanup (`Drop` vs. Explicit `close`):**
+    *   **Problem:** Using `Drop` with synchronous registry access ([`std::sync::RwLock`](mdc:raft-transport/src/mock.rs)) caused race conditions in async tests ([`raft-transport/tests/integration_test.rs`](mdc:raft-transport/tests/integration_test.rs)), as transports were unregistered before async operations completed.
+    *   **Solution:** Removed `Drop` impl and added an explicit `close()` method for unregistration, called synchronously in tests after async operations finish.
+    *   **Lesson:** Avoid synchronous cleanup triggered by `Drop` in async contexts if shared state is involved. Prefer explicit cleanup.
+
+2.  **Network Simulation:**
+    *   Testing requires simulating various conditions: partitions (one-way, asymmetric, temporary), message delays (variable/slow node), and message loss.
+    *   The `MockTransport` with `NetworkOptions` ([`raft-transport/src/network.rs`](mdc:raft-transport/src/network.rs)) provides a foundation for this.
+
+3.  **Robustness:**
+    *   Test scenarios where receivers disappear unexpectedly (e.g., `test_receiver_dropped_before_response`). Ensure sends fail gracefully (e.g., `RecvError` or `SendError`) rather than blocking indefinitely.
+
+## General Testing Strategy
+
+*   **Leverage Mocks:** Use mock implementations (`MockStorage` in `raft-core`, `InMemoryStorage`, `MockTransport`) extensively for unit and integration tests.
+*   **State Transitions:** Test all possible state transitions rigorously (e.g., Follower -> Candidate -> Leader).
+*   **Deterministic Control:** Aim for deterministic tests where possible, especially for timing-sensitive logic like election timeouts (future phase).
+
+Refer back to these points when implementing and testing future Raft phases, especially the core state machine logic.
