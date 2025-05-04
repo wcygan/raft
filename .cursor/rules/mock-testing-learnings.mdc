@@ -1,0 +1,22 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Learnings from `MockTransport` Refactoring (Registry and Concurrency)
+
+When implementing mock components for testing, especially those requiring shared state or discovery mechanisms between instances (like network transports), consider the following lessons learned from refactoring [`raft-transport/src/mock.rs`](mdc:raft-transport/src/mock.rs):
+
+1.  **Avoid Static Mutable State for Test Isolation:**
+    *   **Problem:** The initial `MockTransport` used a `static REGISTRY` (a `Lazy<RwLock<HashMap<...>>>`). While seemingly convenient, this caused tests run concurrently (`cargo test`) to interfere with each other, leading to panics (`Transport for node X already exists!`) or unpredictable behavior. It required the `--test-threads=1` workaround.
+    *   **Lesson:** Global mutable static variables are generally unsuitable for managing state across independent test cases due to the lack of isolation.
+
+2.  **Use Instance-Specific Shared State via `Arc`:**
+    *   **Solution:** The refactored `MockTransport` now uses a non-static `TransportRegistry` struct. An `Arc<TransportRegistry>` is created *per test* (or per related group of mock objects) and passed explicitly during the creation of each `MockTransport` instance (`create_with_options`).
+    *   **Benefit:** Transports created with the *same* `Arc<TransportRegistry>` can find and communicate with each other, while transports from different tests (using different `Arc` instances) remain completely isolated. This enables reliable concurrent test execution. See usage in [`raft-transport/tests/integration_test.rs`](mdc:raft-transport/tests/integration_test.rs).
+
+3.  **Leverage `Drop` for Automatic Cleanup:**
+    *   **Solution:** `MockTransport` now implements the `Drop` trait. When a `MockTransport` instance goes out of scope at the end of a test, its `drop` implementation automatically removes its entry from the associated `TransportRegistry`.
+    *   **Benefit:** This eliminates the need for manual cleanup functions (like the previous `MockTransport::destroy` or test-specific `cleanup` helpers), making tests cleaner and less prone to resource leaks or state persistence between tests.
+
+**Best Practice:** For mock objects requiring shared state within a single test's context but isolation *between* tests, prefer passing an explicit shared context object (like `Arc<TransportRegistry>`) during instantiation over relying on global static state. Implement `Drop` for automatic resource cleanup.

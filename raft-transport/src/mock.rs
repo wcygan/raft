@@ -1,11 +1,11 @@
 use crate::error::TransportError;
 use crate::network::NetworkOptions;
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use raft_core::NodeId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use std::sync::RwLock;
+use tokio::sync::{mpsc, oneshot};
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
@@ -48,32 +48,73 @@ pub struct PeerReceivers {
     // Add InstallSnapshot receiver if needed
 }
 
-/// Global registry mapping NodeId to their transport senders.
-static REGISTRY: Lazy<RwLock<HashMap<NodeId, PeerSenders>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+/// A shared registry for MockTransport instances within a test context.
+#[derive(Debug, Clone, Default)]
+pub struct TransportRegistry {
+    // Use std::sync::RwLock for synchronous access in Drop
+    endpoints: Arc<RwLock<HashMap<NodeId, PeerSenders>>>,
+}
+
+impl TransportRegistry {
+    /// Creates a new, empty transport registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers the senders for a given node ID.
+    /// Panics if the node ID is already registered (indicates test setup error).
+    fn register(&self, id: NodeId, senders: PeerSenders) {
+        let mut guard = self.endpoints.write().expect("Registry lock poisoned");
+        if guard.insert(id, senders).is_some() {
+            panic!("TransportRegistry: Node {} already registered!", id);
+        }
+        tracing::trace!(node_id = id, "Registered transport endpoint");
+    }
+
+    /// Unregisters the senders for a given node ID.
+    fn unregister(&self, id: NodeId) {
+        let mut guard = self.endpoints.write().expect("Registry lock poisoned");
+        if guard.remove(&id).is_some() {
+            tracing::trace!(node_id = id, "Unregistered transport endpoint");
+        }
+    }
+
+    /// Looks up the senders for a given node ID.
+    fn lookup(&self, id: NodeId) -> Option<PeerSenders> {
+        self.endpoints
+            .read()
+            .expect("Registry lock poisoned")
+            .get(&id)
+            .cloned() // Clone the Senders (cheap Arc clones)
+    }
+}
 
 /// A mock transport layer using Tokio MPSC channels for in-memory communication.
 ///
 /// This transport simulates network conditions like delay, loss, and partitions.
+/// It requires a shared `TransportRegistry` to discover peers.
 #[derive(Debug, Clone)]
 pub struct MockTransport {
     node_id: NodeId,
     network_options: Arc<RwLock<NetworkOptions>>,
+    registry: Arc<TransportRegistry>,
+}
+
+impl Drop for MockTransport {
+    fn drop(&mut self) {
+        self.registry.unregister(self.node_id);
+        // Note: Tracing in drop might be unreliable depending on shutdown order
+        // tracing::debug!(node_id = self.node_id, "MockTransport dropped and unregistered");
+    }
 }
 
 impl MockTransport {
-    /// Creates a new MockTransport for the given node ID and registers it.
-    ///
-    /// Returns the transport instance and the receiving ends of the channels.
-    /// Panics if a transport for this node_id already exists.
-    pub async fn create(node_id: NodeId) -> (Self, PeerReceivers) {
-        Self::create_with_options(node_id, NetworkOptions::default()).await
-    }
-
-    /// Creates a new MockTransport with specific network simulation options.
+    /// Creates a new MockTransport with specific network simulation options
+    /// and registers it with the provided registry.
     pub async fn create_with_options(
         node_id: NodeId,
         options: NetworkOptions,
+        registry: Arc<TransportRegistry>,
     ) -> (Self, PeerReceivers) {
         let (ae_tx, ae_rx) = mpsc::channel(100); // Buffer size 100
         let (rv_tx, rv_rx) = mpsc::channel(100);
@@ -88,35 +129,21 @@ impl MockTransport {
             request_vote_rx: rv_rx,
         };
 
+        registry.register(node_id, senders);
+
         let transport = MockTransport {
             node_id,
             network_options: Arc::new(RwLock::new(options)),
+            registry,
         };
-
-        let mut registry = REGISTRY.write().await;
-        if registry.insert(node_id, senders).is_some() {
-            // Use panic because this indicates a setup error in tests
-            panic!("Transport for node {} already exists!", node_id);
-        }
 
         tracing::debug!(node_id, "MockTransport created and registered");
         (transport, receivers)
     }
 
-    /// Removes the transport for the given node ID from the registry.
-    /// Should be called during test teardown.
-    pub async fn destroy(node_id: NodeId) {
-        let mut registry = REGISTRY.write().await;
-        if registry.remove(&node_id).is_some() {
-            tracing::debug!(node_id, "MockTransport destroyed and unregistered");
-        } else {
-            tracing::warn!(node_id, "Attempted to destroy non-existent MockTransport");
-        }
-    }
-
     /// Updates the network simulation options for this transport.
     pub async fn update_network_options(&self, options: NetworkOptions) {
-        let mut current_options = self.network_options.write().await;
+        let mut current_options = self.network_options.write().expect("Options lock poisoned");
         *current_options = options;
         tracing::debug!(
             node_id = self.node_id,
@@ -127,7 +154,7 @@ impl MockTransport {
 
     /// Partitions this node from the specified peer (one-way).
     pub async fn partition_from(&self, peer_id: NodeId) {
-        let mut options = self.network_options.write().await;
+        let mut options = self.network_options.write().expect("Options lock poisoned");
         options.partitioned_links.insert((self.node_id, peer_id));
         tracing::info!(
             from = self.node_id,
@@ -138,7 +165,7 @@ impl MockTransport {
 
     /// Removes a previously created partition from this node to the specified peer.
     pub async fn heal_partition_from(&self, peer_id: NodeId) {
-        let mut options = self.network_options.write().await;
+        let mut options = self.network_options.write().expect("Options lock poisoned");
         if options.partitioned_links.remove(&(self.node_id, peer_id)) {
             tracing::info!(
                 from = self.node_id,
@@ -154,47 +181,50 @@ impl MockTransport {
         peer_id: NodeId,
         request: Req,
         sender_channel: &mpsc::Sender<(Req, oneshot::Sender<Result<Resp>>)>,
-    ) -> Result<Resp> {
-        let options = self.network_options.read().await;
+    ) -> Result<Resp>
+    where
+        Req: std::fmt::Debug,
+    {
+        let options = self
+            .network_options
+            .read()
+            .expect("Options lock poisoned")
+            .clone();
 
-        // 1. Check for partition
         if options.is_partitioned(self.node_id, peer_id) {
             tracing::warn!(
                 from = self.node_id,
                 to = peer_id,
+                ?request,
                 "Message blocked by partition"
             );
             return Err(TransportError::Partitioned(self.node_id, peer_id).into());
         }
 
-        // 2. Simulate delay
         options.simulate_delay().await;
 
-        // 3. Check for message loss
         if options.should_drop_message() {
             tracing::warn!(
                 from = self.node_id,
                 to = peer_id,
+                ?request,
                 "Message dropped due to simulated loss"
             );
             return Err(TransportError::MessageDropped(peer_id).into());
         }
 
-        // 4. Prepare response channel
         let (resp_tx, resp_rx) = oneshot::channel();
 
-        // 5. Send the request
         if let Err(e) = sender_channel.send((request, resp_tx)).await {
             tracing::error!(from = self.node_id, to = peer_id, error = ?e, "Failed to send request via channel");
             return Err(TransportError::SendError(peer_id, e.to_string()).into());
         }
 
-        // 6. Wait for the response
         match resp_rx.await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(e)) => {
                 tracing::error!(from = self.node_id, to = peer_id, error = ?e, "Received error response from peer");
-                Err(e) // Propagate the error returned by the peer
+                Err(e)
             }
             Err(_) => {
                 tracing::error!(
@@ -207,7 +237,6 @@ impl MockTransport {
         }
     }
 
-    // These methods will be called by the `Transport` trait implementation in lib.rs
     pub(crate) async fn send_append_entries_impl(
         &self,
         peer_id: NodeId,
@@ -216,12 +245,14 @@ impl MockTransport {
         tracing::trace!(
             from = self.node_id,
             to = peer_id,
-            ?request,
+            req_term = request.term,
+            req_prev_log_index = request.prev_log_index,
+            req_entries_len = request.entries.len(),
             "Sending AppendEntries"
         );
-        let registry = REGISTRY.read().await;
-        let peer_senders = registry
-            .get(&peer_id)
+        let peer_senders = self
+            .registry
+            .lookup(peer_id)
             .ok_or(TransportError::PeerNotFound(peer_id))?;
 
         self.send_request(peer_id, request, &peer_senders.append_entries_tx)
@@ -236,12 +267,13 @@ impl MockTransport {
         tracing::trace!(
             from = self.node_id,
             to = peer_id,
-            ?request,
+            req_term = request.term,
+            req_last_log_index = request.last_log_index,
             "Sending RequestVote"
         );
-        let registry = REGISTRY.read().await;
-        let peer_senders = registry
-            .get(&peer_id)
+        let peer_senders = self
+            .registry
+            .lookup(peer_id)
             .ok_or(TransportError::PeerNotFound(peer_id))?;
 
         self.send_request(peer_id, request, &peer_senders.request_vote_tx)

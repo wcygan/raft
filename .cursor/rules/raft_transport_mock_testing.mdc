@@ -1,0 +1,26 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Testing `MockTransport` Learnings
+
+When writing or running tests for the [`MockTransport`](mdc:raft-transport/src/mock.rs) implementation, be aware of the following:
+
+1.  **Instance-Specific Registry:**
+    *   The implementation now uses a non-static `TransportRegistry` passed via `Arc` during `MockTransport::create_with_options`.
+    *   Transports created with the *same* `Arc<TransportRegistry>` instance can discover each other.
+    *   Transports created with *different* registry instances are isolated.
+    *   This **allows tests to run concurrently** without interference, as each test typically creates its own `TransportRegistry`.
+    *   The `--test-threads=1` flag is **no longer required** for `cargo test -p raft-transport`.
+
+2.  **Responder Tasks & Deadlocks:**
+    *   `MockTransport` uses Tokio MPSC channels for requests and `oneshot` channels for responses.
+    *   When a node sends a request (e.g., `send_append_entries`), it blocks awaiting a response on the `oneshot` channel.
+    *   If the receiving node in the test setup doesn't have a task actively listening on its `PeerReceivers` (e.g., `append_entries_rx`) and sending a reply back via the provided `oneshot::Sender`, the sending node will **block indefinitely**, causing the test to hang.
+    *   **Solution:** Ensure *all* nodes expected to receive requests in a test have a corresponding responder task running (like the `spawn_responder_task` helper in [`integration_test.rs`](mdc:raft-transport/tests/integration_test.rs)) to process incoming messages and send replies.
+
+3.  **Test Cleanup (Automatic):**
+    *   `MockTransport` now implements `Drop`.
+    *   When a `MockTransport` instance goes out of scope (e.g., at the end of a test), it automatically unregisters itself from the `TransportRegistry` it belongs to.
+    *   There is **no need** for manual cleanup functions like the previous `MockTransport::destroy` or test-specific `cleanup` helpers.

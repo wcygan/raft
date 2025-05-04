@@ -1,13 +1,19 @@
-mod error;
-mod mock;
-mod network;
+//! Mock transport implementation for Raft testing.
+
+pub mod error;
+pub mod mock;
+pub mod network;
 
 pub use error::TransportError;
-pub use mock::{MockTransport, PeerReceivers};
+pub use mock::MockTransport;
+pub use mock::PeerReceivers; // Expose PeerReceivers for test setup
+pub use mock::TransportRegistry; // Export the new registry
 pub use network::NetworkOptions;
 
+use raft_core::NodeId;
+pub use raft_core::Transport; // Re-export core trait // Re-add missing NodeId import
+
 use async_trait::async_trait;
-use raft_core::{NodeId, Transport};
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
