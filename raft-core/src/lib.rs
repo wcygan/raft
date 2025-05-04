@@ -1057,4 +1057,102 @@ mod tests {
         assert!(storage.read_log_entry(2).await.unwrap().is_none());
         assert!(storage.read_log_entry(3).await.unwrap().is_none());
     }
+
+    // --- RaftNode Method Tests ---
+
+    // Helper to create a default RaftNode for testing
+    fn create_test_node(id: NodeId, peers: Vec<NodeId>) -> RaftNode<MockStorage, MockTransport> {
+        let config = Config {
+            id,
+            peers,
+            heartbeat_timeout: 150, // Example value
+            election_timeout: 300, // Example value
+        };
+        let storage = MockStorage::default();
+        let transport = MockTransport::default();
+        RaftNode::new(id, config, storage, transport)
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote() {
+        // --- Scenario 1: Grant Vote --- 
+        let mut node1 = create_test_node(1, vec![1, 2, 3]);
+        node1.state.hard_state.term = 1;
+        node1.storage.save_hard_state(&node1.state.hard_state).await.unwrap(); // Sync mock storage
+
+        let request1 = RequestVoteRequest {
+            term: 1,
+            candidate_id: 2,
+            last_log_index: 0, // Assuming empty logs for simplicity here
+            last_log_term: 0,
+        };
+        let response1 = node1.handle_request_vote(request1).await.unwrap();
+        assert!(response1.vote_granted, "Scenario 1: Vote should be granted");
+        assert_eq!(response1.term, 1, "Scenario 1: Term should match");
+        assert_eq!(node1.state.hard_state.voted_for, 2, "Scenario 1: Should have voted for candidate 2");
+        let stored_state1 = node1.storage.read_hard_state().await.unwrap();
+        assert_eq!(stored_state1.voted_for, 2, "Scenario 1: Persisted voted_for should be 2");
+        assert_eq!(stored_state1.term, 1, "Scenario 1: Persisted term should be 1");
+
+        // --- Scenario 2: Reject Vote (Lower Term) ---
+        let mut node2 = create_test_node(1, vec![1, 2, 3]);
+        node2.state.hard_state.term = 2;
+        node2.storage.save_hard_state(&node2.state.hard_state).await.unwrap();
+        
+        let request2 = RequestVoteRequest {
+            term: 1, // Lower term
+            candidate_id: 2,
+            last_log_index: 0, 
+            last_log_term: 0,
+        };
+        let response2 = node2.handle_request_vote(request2).await.unwrap();
+        assert!(!response2.vote_granted, "Scenario 2: Vote should be rejected (lower term)");
+        assert_eq!(response2.term, 2, "Scenario 2: Term should be node's current term (2)");
+        assert_eq!(node2.state.hard_state.voted_for, 0, "Scenario 2: Should not have voted");
+        let stored_state2 = node2.storage.read_hard_state().await.unwrap();
+        assert_eq!(stored_state2.voted_for, 0, "Scenario 2: Persisted voted_for should remain 0");
+
+        // --- Scenario 3: Reject Vote (Already Voted in Term) ---
+        let mut node3 = create_test_node(1, vec![1, 2, 3]);
+        node3.state.hard_state.term = 1;
+        node3.state.hard_state.voted_for = 3; // Already voted for node 3
+        node3.storage.save_hard_state(&node3.state.hard_state).await.unwrap();
+
+        let request3 = RequestVoteRequest {
+            term: 1,
+            candidate_id: 2,
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        let response3 = node3.handle_request_vote(request3).await.unwrap();
+        assert!(!response3.vote_granted, "Scenario 3: Vote should be rejected (already voted)");
+        assert_eq!(response3.term, 1, "Scenario 3: Term should match");
+        assert_eq!(node3.state.hard_state.voted_for, 3, "Scenario 3: Voted_for should remain 3");
+
+        // --- Scenario 4: Grant Vote (Higher Term Received, Step Down) ---
+        let mut node4 = create_test_node(1, vec![1, 2, 3]);
+        node4.state.hard_state.term = 1;
+        node4.state.server.role = Role::Candidate; // Assume was candidate
+        node4.storage.save_hard_state(&node4.state.hard_state).await.unwrap();
+
+        let request4 = RequestVoteRequest {
+            term: 2, // Higher term
+            candidate_id: 2,
+            last_log_index: 0, // Assuming log is ok for simplicity
+            last_log_term: 0,
+        };
+        let response4 = node4.handle_request_vote(request4).await.unwrap();
+        assert!(response4.vote_granted, "Scenario 4: Vote should be granted in new term");
+        assert_eq!(response4.term, 2, "Scenario 4: Term should be updated term (2)");
+        assert_eq!(node4.state.hard_state.term, 2, "Scenario 4: Node term should be updated to 2");
+        assert_eq!(node4.state.hard_state.voted_for, 2, "Scenario 4: Should have voted for candidate 2 in new term");
+        assert_eq!(node4.state.server.role, Role::Follower, "Scenario 4: Node should become Follower");
+        let stored_state4 = node4.storage.read_hard_state().await.unwrap();
+        assert_eq!(stored_state4.term, 2, "Scenario 4: Persisted term should be 2");
+        assert_eq!(stored_state4.voted_for, 2, "Scenario 4: Persisted voted_for should be 2");
+
+        // --- Scenario 5: Reject Vote (Log Not Up-to-Date) --- 
+        // Add this test case separately as it requires log setup
+
+    }
 }
