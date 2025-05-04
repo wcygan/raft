@@ -1,0 +1,14 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Checkpoint Quality Standards
+
+Before marking any project phase or significant milestone as complete (i.e., reaching a checkpoint), the following conditions **MUST** be met:
+
+1.  **Clean Check:** The command `cargo check --workspace` must complete successfully without any errors or warnings.
+2.  **Formatted Code:** The command `cargo fmt --all` must report no changes needed.
+3.  **Passing Tests:** The command `cargo test --workspace` must complete successfully, with all tests passing.
+
+Any deviations from these standards (lint warnings, formatting issues, failing tests) must be addressed and fixed *before* the checkpoint is considered reached.
