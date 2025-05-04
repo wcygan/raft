@@ -1,0 +1,29 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Use Logging for Effective Test Feedback
+
+When writing and debugging tests, especially integration or complex unit tests involving asynchronous operations or state changes, leverage the `tracing` framework to gain insights into the dynamic behavior of the system.
+
+## Why Logging in Tests?
+
+*   **Visibility:** Logs provide a chronological record of events, state changes, and interactions between components during test execution.
+*   **Debugging Failures:** When tests fail unexpectedly, detailed logs (e.g., `TRACE` or `DEBUG` level) are often the quickest way to pinpoint the sequence of operations that led to the error. This is crucial for understanding issues related to timing, concurrency, or incorrect state transitions.
+*   **Understanding Asynchronous Flow:** In `tokio`-based tests, logs help track task spawning, message passing between channels (like in [`MockTransport`](mdc:raft-transport/src/mock.rs)), and the order of asynchronous operations.
+*   **Deterministic Testing Support:** While not making inherently non-deterministic tests deterministic, logs help understand *why* a seemingly non-deterministic test failed by revealing the specific interleaving or timing that occurred.
+
+## Best Practices:
+
+1.  **Initialize Tracing:** Ensure tracing is initialized at the start of your test functions, typically using a helper like `init_tracing()` found in [`raft-transport/tests/integration_test.rs`](mdc:raft-transport/tests/integration_test.rs). This setup often includes environment filters (`RUST_LOG` or similar) to control log verbosity.
+2.  **Use Semantic Logging:** Add informative `tracing` calls (`trace!`, `debug!`, `info!`, `warn!`, `error!`) at key points in both the test logic and the code under test.
+    *   Log entry/exit points of significant functions.
+    *   Log state changes (e.g., Raft role transitions, log appends).
+    *   Log sent/received messages or RPCs.
+    *   Include relevant variables using the `?` debug format (e.g., `tracing::debug!(?request, "Sending request");`).
+3.  **Leverage Spans:** Use `tracing::span!` to group related log events within a specific context (e.g., processing a specific request, running a particular test phase).
+4.  **Run with Output:** Execute failing tests with output capturing enabled (e.g., `cargo test your_test_name -- --nocapture`) to view the logs.
+5.  **Filter Appropriately:** Use environment variables (like `RUST_LOG=trace` or `RUST_LOG=raft_core=debug,raft_transport=trace`) to adjust the level of detail needed for debugging without being overwhelmed.
+
+Effective logging transforms tests from simple pass/fail indicators into powerful diagnostic tools, significantly speeding up development and debugging cycles, especially in complex systems like Raft. Refer to the existing tests in [`raft-transport/tests/integration_test.rs`](mdc:raft-transport/tests/integration_test.rs) for examples.
