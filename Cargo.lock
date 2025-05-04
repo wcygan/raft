@@ -563,6 +563,12 @@ dependencies = [
 name = "raft-storage"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "raft-core",
+ "tokio",
+ "tracing",
  "wcygan_raft_community_neoeinstein-prost",
 ]
 

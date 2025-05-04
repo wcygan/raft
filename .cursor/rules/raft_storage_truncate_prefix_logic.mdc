@@ -1,0 +1,24 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Logic for `truncate_log_prefix` in `raft-storage`
+
+When implementing `truncate_log_prefix` for Raft storage, especially in-memory versions like in [`raft-storage/src/lib.rs`](mdc:raft-storage/src/lib.rs), it is crucial to operate based on the **absolute log indices** stored within each `LogEntry`.
+
+**Problem Encountered:**
+An earlier implementation calculated the `Vec` index to drain based on the provided `end_index_exclusive` (which is an absolute log index). This led to incorrect behavior, particularly when `end_index_exclusive` was greater than the highest index currently in the log. For example, trying to truncate everything before index 7 in a log containing indices [1, 2, 3, 4, 5] failed to clear the log because the `Vec`-based calculation didn't map correctly to the requirement of removing all entries.
+
+**Correct Approach:**
+
+1.  **Find the Target Position:** Iterate through the log (`inner.log.iter()`) and find the `position()` (the `Vec` index) of the *first* `LogEntry` whose absolute index (`entry.index`) is greater than or equal to `end_index_exclusive`.
+    ```rust
+    let keep_from_pos = inner.log.iter().position(|entry| entry.index >= end_index_exclusive);
+    ```
+2.  **Handle Cases:**
+    *   **`Some(pos)`:** An entry to keep was found at `Vec` index `pos`. Drain all preceding elements using `inner.log.drain(..pos);`.
+    *   **`None`:** No entry with `index >= end_index_exclusive` exists. This means all entries should be removed. Clear the log using `inner.log.clear();`.
+3.  **Edge Case (Index <= 1):** Truncating before index 1 (or 0) should typically mean keeping all existing entries (i.e., do nothing).
+
+This approach ensures that the truncation logic correctly handles the absolute nature of Raft log indices, regardless of how the underlying `Vec` is structured after previous truncations.

@@ -1,0 +1,18 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Debugging Tests with Runtime Output
+
+When encountering failing tests or unexpected behavior that isn't immediately obvious from static code analysis, utilize runtime output to gain dynamic insights:
+
+1.  **Identify Key Locations:** Pinpoint areas in the test function or the code under test where observing variable values, state transitions, or execution flow would be helpful.
+2.  **Insert Temporary Prints/Logs:** Add temporary print statements (e.g., `eprintln!("DEBUG: Value is {:?}", my_var);`, `dbg!(my_var);`) or logging statements (`tracing::debug!(?my_var, "State changed");`) at these locations.
+3.  **Run Test with Output:** Execute the specific failing test (or the relevant test suite) ensuring that the output is captured. For Rust tests, use `cargo test your_test_name -- --nocapture`.
+4.  **Analyze Dynamic Behavior:** Examine the captured output to understand the actual runtime values and execution path leading up to the failure or unexpected behavior.
+5.  **Synthesize Information:** Combine the dynamic runtime observations with static analysis of the code to form a hypothesis about the root cause.
+6.  **Iterate and Fix:** Adjust the code based on the hypothesis and re-run the test. Repeat the process if necessary.
+7.  **Clean Up:** Once the issue is resolved, remove the temporary print/logging statements.
+
+This practice of observing dynamic runtime behavior is crucial for debugging complex interactions, stateful logic, and issues that only manifest under specific execution conditions.

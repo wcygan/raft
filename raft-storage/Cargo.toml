@@ -1,7 +1,16 @@
 [package]
 name = "raft-storage"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-wcygan_raft_community_neoeinstein-prost = { workspace = true }
+raft-core = { path = "../raft-core" }
+tokio = { workspace = true, features = ["sync"] } # Need sync feature for Mutex
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+wcygan_raft_community_neoeinstein-prost = { workspace = true } # For LogEntry type
+
+[dev-dependencies]
+# Add dev dependencies if needed for tests, e.g., specific tokio features
+bytes = { workspace = true } # Needed for test helper `create_entry`

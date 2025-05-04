@@ -7,7 +7,7 @@ edition = "2021"
 wcygan_raft_community_neoeinstein-prost = { workspace = true }
 prost = { workspace = true }
 # Add async-trait for async methods in traits
-async-trait = "0.1"
+async-trait = { workspace = true }
 # Add anyhow for error handling in trait methods
 anyhow = { workspace = true }
 # Add tokio for async runtime features in tests (e.g. Mutex)
