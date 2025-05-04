@@ -125,3 +125,29 @@ pub struct RaftNode<S: Storage, T: Transport> {
     /// The transport layer for sending and receiving messages
     pub transport: T,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_raft_state_new() {
+        let state = RaftState::new();
+
+        // Verify persistent state defaults
+        assert_eq!(state.persistent.current_term, 0);
+        assert_eq!(state.persistent.voted_for, None);
+        assert!(state.persistent.log.is_empty());
+
+        // Verify volatile state defaults
+        assert_eq!(state.volatile.commit_index, 0);
+        assert_eq!(state.volatile.last_applied, 0);
+
+        // Verify leader state defaults
+        assert!(state.leader.next_index.is_empty());
+        assert!(state.leader.match_index.is_empty());
+
+        // Verify server state defaults
+        assert_eq!(state.server.role, Role::Follower);
+    }
+}
