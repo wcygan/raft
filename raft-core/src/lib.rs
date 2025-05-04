@@ -194,13 +194,10 @@ pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Send + Sy
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use prost::Message;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use wcygan_raft_community_neoeinstein_prost::raft::v1::{
-        InstallSnapshotRequest, InstallSnapshotResponse,
-    };
+    use wcygan_raft_community_neoeinstein_prost::raft::v1::{HardState, InstallSnapshotRequest, InstallSnapshotResponse};
 
     #[test]
     fn test_raft_state_new() {

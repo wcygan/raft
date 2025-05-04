@@ -1,11 +1,11 @@
-use anyhow::Result;
+// use anyhow::Result; // Removed unused import
 use raft_core::NodeId;
 use raft_transport::{
     MockTransport, NetworkOptions, PeerReceivers, Transport, TransportError, TransportRegistry,
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
+// use tokio::sync::oneshot; // Removed unused import
 use tokio::time::Instant;
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
@@ -22,6 +22,7 @@ fn init_tracing() {
 
 // Helper struct to manage transport and receiver handles for a node
 struct TestNode {
+    #[allow(dead_code)] // This ID is useful for debugging/tracing but not read in assertions
     id: NodeId,
     transport: MockTransport,
     receivers: Option<PeerReceivers>,
@@ -85,7 +86,7 @@ async fn test_basic_send_recv() {
     init_tracing();
     let registry = Arc::new(TransportRegistry::new());
 
-    let mut node1 = TestNode::new(1, registry.clone()).await;
+    let node1 = TestNode::new(1, registry.clone()).await;
     let mut node2 = TestNode::new(2, registry.clone()).await;
 
     TestNode::spawn_responder_task(node2.take_receivers());
