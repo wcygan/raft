@@ -1,8 +1,24 @@
 [package]
 name = "raft-transport"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+# Workspace dependencies
+raft-core = { path = "../raft-core" }
 wcygan_raft_community_neoeinstein-prost = { workspace = true }
-wcygan_raft_community_neoeinstein-tonic = { workspace = true }
+
+# External dependencies
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] } # Need sync for channels, rt for spawn, time for delays
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true } # For oneshot channel coordination if needed
+rand = { workspace = true } # For simulating message loss
+tracing = { workspace = true }
+thiserror = { workspace = true }
+once_cell = "1.19"
+
+[dev-dependencies]
+# Add test dependencies if needed, e.g., more specific tokio features for testing
+tokio = { workspace = true, features = ["full"] } # Full features for tests simplifies things
+tracing-subscriber = { workspace = true, features = ["env-filter"] } # For initializing tracing in tests
