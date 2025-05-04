@@ -334,6 +334,13 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
         let mut granted_votes_count = self.votes_received.len(); // Start with self-vote
         let required_votes = (self.config.peers.len() / 2) + 1; // Integer division automatically floors
 
+        // Check for immediate win (e.g., single node cluster)
+        if granted_votes_count >= required_votes {
+            tracing::info!(node_id = %self.id, term = current_term, votes = granted_votes_count, required = required_votes, "Election won immediately (majority of 1), becoming leader.");
+            self.become_leader().await?;
+            return Ok(()); // Already leader, no need to wait for tasks
+        }
+
         for task in vote_tasks {
             // Ensure we only process results if still a candidate in the same term
             if self.state.server.role != Role::Candidate || self.state.hard_state.term != current_term {

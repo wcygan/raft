@@ -62,5 +62,50 @@ async fn test_initial_state() {
     }
 }
 
-// TODO: Add test_single_node_becomes_leader
+#[tokio::test]
+async fn test_single_node_becomes_leader() {
+    let node_ids = vec![1];
+    let (nodes, _registry) = setup_cluster(node_ids).await;
+    let node_ref = nodes.get(&1).unwrap();
+
+    // Initial state check (already tested, but good for context)
+    {
+        let node = node_ref.lock().await;
+        assert_eq!(node.state.server.role, Role::Follower);
+        assert_eq!(node.state.hard_state.term, 0);
+    }
+
+    // Simulate election timeout
+    // In a real scenario, a timer would trigger this. Here we call it directly.
+    node_ref
+        .lock()
+        .await
+        .handle_election_timeout()
+        .await
+        .unwrap();
+
+    // Check final state
+    {
+        let node = node_ref.lock().await;
+        assert_eq!(
+            node.state.server.role,
+            Role::Leader,
+            "Node should become leader"
+        );
+        assert_eq!(
+            node.state.hard_state.term, 1,
+            "Term should be incremented to 1"
+        );
+        assert_eq!(
+            node.state.hard_state.voted_for, 1,
+            "Should have voted for self"
+        );
+        assert_eq!(
+            node.state.server.leader_id,
+            Some(1),
+            "Leader ID should be self"
+        );
+    }
+}
+
 // TODO: Add test_three_node_election
