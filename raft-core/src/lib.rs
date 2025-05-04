@@ -1,11 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use prost::Message;
 use std::collections::HashMap;
 
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
-    AppendEntriesRequest, AppendEntriesResponse, HardState, InstallSnapshotRequest,
-    InstallSnapshotResponse, LogEntry, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, HardState, LogEntry, RequestVoteRequest, RequestVoteResponse,
 };
 
 /// Represents a unique identifier for a node in the Raft cluster.
@@ -180,7 +178,9 @@ pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Send + Sy
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use prost::Message;
     use tokio::sync::Mutex;
+    use wcygan_raft_community_neoeinstein_prost::raft::v1::{InstallSnapshotRequest, InstallSnapshotResponse};
 
     #[test]
     fn test_raft_state_new() {
