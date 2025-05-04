@@ -40,7 +40,7 @@ impl Storage for InMemoryStorage {
             new_commit = state.commit_index,
             "Saving HardState"
         );
-        inner.hard_state = state.clone();
+        inner.hard_state = *state;
         Ok(())
     }
 
@@ -52,7 +52,7 @@ impl Storage for InMemoryStorage {
             commit = inner.hard_state.commit_index,
             "Reading HardState"
         );
-        Ok(inner.hard_state.clone())
+        Ok(inner.hard_state)
     }
 
     async fn append_log_entries(&mut self, entries: &[ProstLogEntry]) -> Result<()> {

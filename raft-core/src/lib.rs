@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, HardState, LogEntry, RequestVoteRequest,
@@ -24,7 +25,7 @@ pub struct Config {
 }
 
 /// Represents the possible roles a Raft node can be in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// The node is a follower, waiting for heartbeats from the leader
     Follower,
@@ -34,32 +35,36 @@ pub enum Role {
     Leader,
 }
 
-/// Volatile state maintained on all servers but not persisted
-#[derive(Debug, Clone)]
+/// Represents the volatile state managed by a Raft node.
+#[derive(Debug, Clone, PartialEq)]
 pub struct VolatileState {
     /// The index of the highest log entry applied to the state machine
     pub last_applied: u64,
 }
 
-/// Volatile state maintained only on leaders, reinitialized after election
-#[derive(Debug, Clone, Default)]
+/// Represents state specific to a Raft leader.
+#[derive(Debug, Clone, PartialEq)]
 pub struct LeaderState {
     /// For each server, the next log entry to send to that server
+    /// (initialized to leader last log index + 1)
     pub next_index: HashMap<NodeId, u64>,
-    /// For each server, the index of the highest log entry known to be replicated
+    /// For each server, index of the highest log entry known to be replicated
+    /// on server (initialized to 0, increases monotonically)
     pub match_index: HashMap<NodeId, u64>,
 }
 
-/// Implementation-specific state not part of the Raft paper's state model
-#[derive(Debug, Clone)]
+/// Represents implementation-specific server state.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ServerState {
     /// The current role of the node (Follower, Candidate, Leader)
     pub role: Role,
+    /// The leader ID
+    pub leader_id: Option<NodeId>,
     // Other implementation-specific fields could go here
 }
 
 /// Represents the complete state of a Raft node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RaftState {
     /// The hard state that must be persisted to stable storage
     pub hard_state: HardState,
@@ -71,33 +76,44 @@ pub struct RaftState {
     pub leader: LeaderState,
     /// Implementation-specific server state
     pub server: ServerState,
+    /// The ID of the node
+    pub node_id: NodeId,
 }
 
 impl RaftState {
-    /// Creates a new RaftState with default values.
-    pub fn new() -> Self {
+    /// Creates a new `RaftState` with default values.
+    pub fn new(node_id: NodeId) -> Self {
+        let default_hard_state = HardState {
+            term: 0,
+            voted_for: 0,
+            commit_index: 0,
+        };
+        let default_volatile_state = VolatileState { last_applied: 0 };
+        let default_leader_state = LeaderState {
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+        };
+        let default_server_state = ServerState {
+            role: Role::Follower,
+            leader_id: None,
+        };
+
         RaftState {
-            hard_state: HardState {
-                term: 0,
-                voted_for: 0, // 0 means no vote cast (assuming NodeId 0 is not valid)
-                commit_index: 0,
-            },
+            hard_state: default_hard_state,
             log: Vec::new(),
-            volatile: VolatileState { last_applied: 0 },
-            leader: LeaderState {
-                next_index: HashMap::new(),
-                match_index: HashMap::new(),
-            },
-            server: ServerState {
-                role: Role::Follower,
-            },
+            volatile: default_volatile_state,
+            leader: default_leader_state,
+            node_id,
+            server: default_server_state,
         }
     }
 }
 
-// Forward declarations for traits (assuming they are defined elsewhere in raft-core)
-// pub trait Storage {}
-// pub trait Transport {}
+impl Default for RaftState {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
 
 /// Trait defining the persistent storage operations required by Raft.
 #[async_trait]
@@ -178,6 +194,7 @@ pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Send + Sy
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use prost::Message;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -187,11 +204,15 @@ mod tests {
 
     #[test]
     fn test_raft_state_new() {
-        let state = RaftState::new();
+        let node_id = 1;
+        let state = RaftState::new(node_id);
+
+        // Verify node id
+        assert_eq!(state.node_id, node_id);
 
         // Verify hard state defaults
         assert_eq!(state.hard_state.term, 0);
-        assert_eq!(state.hard_state.voted_for, 0); // No vote cast
+        assert_eq!(state.hard_state.voted_for, 0);
         assert_eq!(state.hard_state.commit_index, 0);
 
         // Verify log defaults
@@ -204,8 +225,9 @@ mod tests {
         assert!(state.leader.next_index.is_empty());
         assert!(state.leader.match_index.is_empty());
 
-        // Verify server state defaults
+        // Verify server state defaults using the local Role
         assert_eq!(state.server.role, Role::Follower);
+        assert_eq!(state.server.leader_id, None);
     }
 
     // --- Mock Storage Implementation ---
@@ -409,14 +431,23 @@ mod tests {
         assert_eq!(decoded, le);
 
         // HardState
-        let hs = HardState {
+        let hs_vote = HardState {
             term: 3,
             voted_for: 4,
             commit_index: 5,
         };
-        let buf = hs.encode_to_vec();
-        let decoded = HardState::decode(buf.as_slice()).unwrap();
-        assert_eq!(decoded, hs);
+        let buf_vote = hs_vote.encode_to_vec();
+        let decoded_vote = HardState::decode(buf_vote.as_slice()).unwrap();
+        assert_eq!(decoded_vote, hs_vote);
+
+        let hs_no_vote = HardState {
+            term: 6,
+            voted_for: 0,
+            commit_index: 7,
+        };
+        let buf_no_vote = hs_no_vote.encode_to_vec();
+        let decoded_no_vote = HardState::decode(buf_no_vote.as_slice()).unwrap();
+        assert_eq!(decoded_no_vote, hs_no_vote);
 
         // AppendEntriesRequest
         let aer = AppendEntriesRequest {
@@ -479,4 +510,11 @@ mod tests {
         let decoded = InstallSnapshotResponse::decode(buf.as_slice()).unwrap();
         assert_eq!(decoded, isres);
     }
+
+    // Remove redundant test functions as roundtrip test covers them
+    // #[tokio::test]
+    // async fn test_hard_state_serialization() { ... }
+
+    // #[tokio::test]
+    // async fn test_log_entry_serialization() { ... }
 }

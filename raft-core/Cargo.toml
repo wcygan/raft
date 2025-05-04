@@ -12,6 +12,10 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 # Add tokio for async runtime features in tests (e.g. Mutex)
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Add tokio for async runtime in tests
