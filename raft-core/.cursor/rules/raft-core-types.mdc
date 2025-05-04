@@ -1,0 +1,36 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Raft Core Types
+
+This rule describes the core data structures used in the `raft-core` implementation.
+
+The primary definitions for these types can be found in [lib.rs](mdc:src/lib.rs)
+
+## Key Types
+
+*   `NodeId`: A type alias (`u64`) representing the unique identifier for a node.
+*   `LogEntry`: Represents an entry in the Raft log, containing the term, index, and command.
+*   `Config`: Holds the node's configuration, including its ID, peer list, and timeout settings.
+*   `Role`: An enum defining the possible states of a node: `Follower`, `Candidate`, or `Leader`.
+
+## State Management
+
+The state of a Raft node is divided into several parts:
+
+*   `PersistentState`: State that must be saved to stable storage (current term, voted for, log).
+*   `VolatileState`: State maintained on all servers but not persisted (commit index, last applied index).
+*   `LeaderState`: State maintained only by leaders (next index, match index for each follower).
+*   `ServerState`: Implementation-specific state (e.g., the current `Role`).
+*   `RaftState`: A struct that aggregates all the state components (`persistent`, `volatile`, `leader`, `server`).
+
+## Main Structure
+
+*   `RaftNode`: The main struct representing a Raft node. It is generic over `Storage` and `Transport` traits and holds the node's ID, `RaftState`, `Config`, and instances of the storage and transport layers.
+
+## Traits
+
+*   `Storage`: (Forward declaration) Trait for storage backend implementation.
+*   `Transport`: (Forward declaration) Trait for the network transport layer implementation.
