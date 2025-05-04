@@ -197,8 +197,11 @@ mod tests {
     use prost::Message;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use wcygan_raft_community_neoeinstein_prost::raft::v1::{HardState, InstallSnapshotRequest, InstallSnapshotResponse};
+    use wcygan_raft_community_neoeinstein_prost::raft::v1::{
+        HardState, InstallSnapshotRequest, InstallSnapshotResponse,
+    };
 
+    // --- RaftState Initialization and Defaults ---
     #[test]
     fn test_raft_state_new() {
         let node_id = 1;
@@ -209,7 +212,7 @@ mod tests {
 
         // Verify hard state defaults
         assert_eq!(state.hard_state.term, 0);
-        assert_eq!(state.hard_state.voted_for, 0);
+        assert_eq!(state.hard_state.voted_for, 0); // Use 0 for no vote
         assert_eq!(state.hard_state.commit_index, 0);
 
         // Verify log defaults
@@ -224,7 +227,124 @@ mod tests {
 
         // Verify server state defaults using the local Role
         assert_eq!(state.server.role, Role::Follower);
+        assert_eq!(state.server.leader_id, None); // Leader ID starts as None
+    }
+
+    // --- Helper functions for state transitions (simplified for direct manipulation) ---
+
+    // Simulates becoming a candidate
+    fn become_candidate(state: &mut RaftState, new_term: u64) {
+        state.hard_state.term = new_term;
+        state.hard_state.voted_for = state.node_id; // Vote for self
+        state.server.role = Role::Candidate;
+        state.server.leader_id = None; // No leader when candidate
+    }
+
+    // Simulates becoming a leader
+    fn become_leader(state: &mut RaftState, peers: &[NodeId], last_log_index: u64) {
+        state.server.role = Role::Leader;
+        state.server.leader_id = Some(state.node_id); // Leader is self
+        state.leader.next_index.clear();
+        state.leader.match_index.clear();
+        for &peer_id in peers {
+            state.leader.next_index.insert(peer_id, last_log_index + 1);
+            state.leader.match_index.insert(peer_id, 0);
+        }
+    }
+
+    // Simulates reverting to follower
+    fn become_follower(state: &mut RaftState, new_term: u64, leader_id: Option<NodeId>) {
+        state.hard_state.term = new_term;
+        state.hard_state.voted_for = 0; // Reset vote when becoming follower potentially
+        state.server.role = Role::Follower;
+        state.server.leader_id = leader_id;
+        // Leader state (next/match_index) is implicitly ignored when not leader
+    }
+
+    // --- RaftState Transition Tests ---
+    #[test]
+    fn test_raft_state_transitions() {
+        let node_id = 1;
+        let peers = vec![2, 3];
+        let mut state = RaftState::new(node_id);
+        let initial_last_log_index = 0; // Assuming empty log initially
+
+        // 1. Initial state is Follower
+        assert_eq!(state.server.role, Role::Follower);
+        assert_eq!(state.hard_state.term, 0);
+        assert_eq!(state.hard_state.voted_for, 0);
         assert_eq!(state.server.leader_id, None);
+
+        // 2. Transition to Candidate
+        let term1 = 1;
+        become_candidate(&mut state, term1);
+        assert_eq!(state.server.role, Role::Candidate);
+        assert_eq!(state.hard_state.term, term1);
+        assert_eq!(state.hard_state.voted_for, node_id); // Voted for self
+        assert_eq!(state.server.leader_id, None);
+
+        // 3. Transition to Leader
+        become_leader(&mut state, &peers, initial_last_log_index);
+        assert_eq!(state.server.role, Role::Leader);
+        assert_eq!(state.hard_state.term, term1); // Term doesn't change on becoming leader
+        assert_eq!(state.hard_state.voted_for, node_id); // Vote remains
+        assert_eq!(state.server.leader_id, Some(node_id));
+        assert_eq!(state.leader.next_index.len(), peers.len());
+        assert_eq!(state.leader.match_index.len(), peers.len());
+        for peer_id in &peers {
+            assert_eq!(state.leader.next_index[peer_id], initial_last_log_index + 1);
+            assert_eq!(state.leader.match_index[peer_id], 0);
+        }
+
+        // 4. Discover higher term, revert to Follower
+        let term2 = 2;
+        let new_leader_id = Some(peers[0]);
+        become_follower(&mut state, term2, new_leader_id);
+        assert_eq!(state.server.role, Role::Follower);
+        assert_eq!(state.hard_state.term, term2);
+        assert_eq!(state.hard_state.voted_for, 0); // Vote resets
+        assert_eq!(state.server.leader_id, new_leader_id);
+        // Leader state maps remain but are ignored
+
+        // 5. Become Candidate again in a later term
+        let term3 = 3;
+        become_candidate(&mut state, term3);
+        assert_eq!(state.server.role, Role::Candidate);
+        assert_eq!(state.hard_state.term, term3);
+        assert_eq!(state.hard_state.voted_for, node_id);
+        assert_eq!(state.server.leader_id, None);
+    }
+
+    #[test]
+    fn test_leader_state_updates() {
+        let node_id = 1;
+        let peers = vec![2, 3];
+        let mut state = RaftState::new(node_id);
+        let initial_log_index = 5; // Assume some log entries exist
+
+        // Become leader
+        become_leader(&mut state, &peers, initial_log_index);
+
+        // Simulate successful replication to peer 2 up to index 7
+        let peer2_match_index = 7;
+        state.leader.match_index.insert(2, peer2_match_index);
+        state.leader.next_index.insert(2, peer2_match_index + 1);
+
+        // Simulate successful replication to peer 3 up to index 6
+        let peer3_match_index = 6;
+        state.leader.match_index.insert(3, peer3_match_index);
+        state.leader.next_index.insert(3, peer3_match_index + 1);
+
+        assert_eq!(state.leader.match_index[&2], peer2_match_index);
+        assert_eq!(state.leader.next_index[&2], peer2_match_index + 1);
+        assert_eq!(state.leader.match_index[&3], peer3_match_index);
+        assert_eq!(state.leader.next_index[&3], peer3_match_index + 1);
+
+        // Simulate a scenario where peer 2 needs to backtrack (e.g., after leader change)
+        let peer2_new_next_index = 4;
+        state.leader.next_index.insert(2, peer2_new_next_index);
+        // Match index wouldn't typically decrease here, but next_index would
+        assert_eq!(state.leader.next_index[&2], peer2_new_next_index);
     }
 
     // --- Mock Storage Implementation ---
@@ -254,68 +374,107 @@ mod tests {
 
         async fn append_log_entries(&mut self, entries: &[LogEntry]) -> Result<()> {
             let mut inner = self.inner.lock().await;
+            // Basic append, assumes caller ensures consistency (no gaps, correct overwrite logic)
+            // For mock, we might not need the complex overwrite/gap detection of InMemoryStorage
+            // If the first new entry index is <= current last index, truncate suffix first.
+            if let Some(first_new) = entries.first() {
+                if let Some(last_existing) = inner.log.last() {
+                    if first_new.index <= last_existing.index {
+                        // Find the position to truncate at
+                        let truncate_at_pos =
+                            inner.log.iter().position(|e| e.index >= first_new.index);
+                        if let Some(pos) = truncate_at_pos {
+                            inner.log.truncate(pos);
+                        }
+                    }
+                    // Basic gap check (more robust check belongs in Raft logic)
+                    else if first_new.index > last_existing.index + 1 {
+                        return Err(anyhow::anyhow!(
+                            "MockStorage: Gap detected between log end ({}) and new entries starting at {}",
+                            last_existing.index,
+                            first_new.index
+                        ));
+                    }
+                }
+            }
             inner.log.extend_from_slice(entries);
             Ok(())
         }
 
         async fn read_log_entry(&self, index: u64) -> Result<Option<LogEntry>> {
             let inner = self.inner.lock().await;
-            // Log indices are 1-based
-            if index == 0 || index > inner.log.len() as u64 {
-                return Ok(None);
-            }
-            Ok(inner.log.get((index - 1) as usize).cloned())
+            // Find entry by absolute index
+            Ok(inner
+                .log
+                .iter()
+                .find(|&entry| entry.index == index)
+                .cloned())
         }
 
         async fn read_log_entries(
             &self,
-            start_index: u64,
-            end_index: u64,
+            start_index: u64, // Inclusive, 1-based
+            end_index: u64,   // Exclusive, 1-based
         ) -> Result<Vec<LogEntry>> {
             let inner = self.inner.lock().await;
-            // Indices are 1-based, range is exclusive end
-            let start = (start_index.max(1) - 1) as usize;
-            let end = (end_index.max(1) - 1) as usize;
-            if start >= inner.log.len() || start > end {
-                return Ok(Vec::new());
-            }
-            let actual_end = end.min(inner.log.len());
-            Ok(inner.log[start..actual_end].to_vec())
+            // Filter by absolute index range
+            let result = inner
+                .log
+                .iter()
+                .filter(|&entry| entry.index >= start_index && entry.index < end_index)
+                .cloned()
+                .collect();
+            Ok(result)
         }
 
         async fn truncate_log_prefix(&mut self, end_index_exclusive: u64) -> Result<()> {
             let mut inner = self.inner.lock().await;
-            // Indices are 1-based, exclusive end
-            let keep_from = (end_index_exclusive.max(1) - 1) as usize;
-            if keep_from >= inner.log.len() {
-                inner.log.clear();
-            } else {
-                inner.log = inner.log.split_off(keep_from);
+            if end_index_exclusive <= 1 {
+                return Ok(()); // Keep all
+            }
+            // Find the Vec position of the first entry to *keep* (index >= end_index_exclusive)
+            let keep_from_pos = inner
+                .log
+                .iter()
+                .position(|entry| entry.index >= end_index_exclusive);
+
+            match keep_from_pos {
+                Some(pos) => {
+                    // Drain elements *before* this position
+                    inner.log.drain(..pos);
+                }
+                None => {
+                    // No entry found with index >= end_index_exclusive, clear the whole log
+                    inner.log.clear();
+                }
             }
             Ok(())
         }
 
         async fn truncate_log_suffix(&mut self, start_index_inclusive: u64) -> Result<()> {
             let mut inner = self.inner.lock().await;
-            // Indices are 1-based, inclusive start
-            if start_index_inclusive == 0 {
-                inner.log.clear();
-                return Ok(());
+            // Find the Vec position of the first entry to *remove* (index >= start_index_inclusive)
+            let truncate_at_pos = inner
+                .log
+                .iter()
+                .position(|entry| entry.index >= start_index_inclusive);
+
+            if let Some(pos) = truncate_at_pos {
+                inner.log.truncate(pos); // truncate keeps elements *before* pos
             }
-            let truncate_at = (start_index_inclusive - 1) as usize;
-            if truncate_at < inner.log.len() {
-                inner.log.truncate(truncate_at);
-            }
+            // If no entry >= start_index_inclusive exists, truncate does nothing (keeps all), which is correct.
             Ok(())
         }
 
         async fn last_log_index(&self) -> Result<u64> {
             let inner = self.inner.lock().await;
-            Ok(inner.log.len() as u64)
+            // Get index of the actual last entry
+            Ok(inner.log.last().map_or(0, |entry| entry.index))
         }
 
         async fn last_log_term(&self) -> Result<u64> {
             let inner = self.inner.lock().await;
+            // Get term of the actual last entry
             Ok(inner.log.last().map_or(0, |entry| entry.term))
         }
     }
@@ -508,10 +667,119 @@ mod tests {
         assert_eq!(decoded, isres);
     }
 
-    // Remove redundant test functions as roundtrip test covers them
-    // #[tokio::test]
-    // async fn test_hard_state_serialization() { ... }
+    // --- Storage Trait Edge Case Tests (using MockStorage) ---
 
-    // #[tokio::test]
-    // async fn test_log_entry_serialization() { ... }
+    #[tokio::test]
+    async fn test_storage_read_boundary_conditions() {
+        let mut storage = MockStorage::default();
+        let entries = vec![
+            LogEntry {
+                index: 1,
+                term: 1,
+                command: vec![1].into(),
+            },
+            LogEntry {
+                index: 2,
+                term: 1,
+                command: vec![2].into(),
+            },
+        ];
+        storage.append_log_entries(&entries).await.unwrap();
+
+        // Read single entry at boundaries
+        assert!(
+            storage.read_log_entry(0).await.unwrap().is_none(),
+            "Index 0 read"
+        );
+        assert!(
+            storage.read_log_entry(1).await.unwrap().is_some(),
+            "Index 1 read"
+        );
+        assert!(
+            storage.read_log_entry(2).await.unwrap().is_some(),
+            "Index 2 read"
+        );
+        assert!(
+            storage.read_log_entry(3).await.unwrap().is_none(),
+            "Index 3 read"
+        );
+
+        // Read range at boundaries
+        assert_eq!(
+            storage.read_log_entries(1, 1).await.unwrap().len(),
+            0,
+            "Range 1..1"
+        );
+        assert_eq!(
+            storage.read_log_entries(1, 2).await.unwrap().len(),
+            1,
+            "Range 1..2"
+        ); // Entry 1
+        assert_eq!(
+            storage.read_log_entries(1, 3).await.unwrap().len(),
+            2,
+            "Range 1..3"
+        ); // Entries 1, 2
+        assert_eq!(
+            storage.read_log_entries(2, 3).await.unwrap().len(),
+            1,
+            "Range 2..3"
+        ); // Entry 2
+        assert_eq!(
+            storage.read_log_entries(3, 4).await.unwrap().len(),
+            0,
+            "Range 3..4"
+        );
+        assert_eq!(
+            storage.read_log_entries(0, 3).await.unwrap().len(),
+            2,
+            "Range 0..3 -> 1..3"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_truncate_boundary_conditions() {
+        let mut storage = MockStorage::default();
+        let entries = vec![
+            LogEntry {
+                index: 1,
+                term: 1,
+                command: vec![1].into(),
+            },
+            LogEntry {
+                index: 2,
+                term: 1,
+                command: vec![2].into(),
+            },
+            LogEntry {
+                index: 3,
+                term: 2,
+                command: vec![3].into(),
+            },
+        ];
+        storage.append_log_entries(&entries).await.unwrap(); // Log: [1, 2, 3]
+
+        // Truncate suffix at boundaries
+        storage.truncate_log_suffix(4).await.unwrap(); // Keep up to index 3 (exclusive -> keep 1,2,3). No-op.
+        assert_eq!(storage.last_log_index().await.unwrap(), 3);
+        storage.truncate_log_suffix(3).await.unwrap(); // Keep up to index 2 (exclusive -> keep 1,2). Removes 3.
+        assert_eq!(storage.last_log_index().await.unwrap(), 2);
+        storage.truncate_log_suffix(1).await.unwrap(); // Keep up to index 0 (exclusive -> keep none). Removes 1, 2.
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+
+        // Reset and test truncate prefix
+        storage.append_log_entries(&entries).await.unwrap(); // Log: [1, 2, 3]
+        storage.truncate_log_prefix(0).await.unwrap(); // Keep >= 0. No-op. (Corrected: Should keep >= 1, effectively no-op)
+        assert_eq!(storage.last_log_index().await.unwrap(), 3);
+        storage.truncate_log_prefix(1).await.unwrap(); // Keep >= 1. No-op.
+        assert_eq!(storage.last_log_index().await.unwrap(), 3);
+        storage.truncate_log_prefix(2).await.unwrap(); // Keep >= 2. Removes 1. Log: [2, 3]
+        assert_eq!(storage.last_log_index().await.unwrap(), 3);
+        assert!(storage.read_log_entry(1).await.unwrap().is_none());
+        assert!(storage.read_log_entry(2).await.unwrap().is_some());
+        storage.truncate_log_prefix(4).await.unwrap(); // Keep >= 4. Removes 2, 3. Log: []
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+        assert!(storage.read_log_entry(2).await.unwrap().is_none());
+        assert!(storage.read_log_entry(3).await.unwrap().is_none());
+    }
 }

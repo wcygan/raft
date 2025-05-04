@@ -6,7 +6,7 @@ use raft_transport::{
 use std::sync::Arc;
 use std::time::Duration;
 // use tokio::sync::oneshot; // Removed unused import
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep};
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
@@ -49,6 +49,11 @@ impl TestNode {
 
     fn take_receivers(&mut self) -> PeerReceivers {
         self.receivers.take().expect("Receivers already taken")
+    }
+
+    /// Closes the transport associated with this test node.
+    fn close(&self) {
+        self.transport.close();
     }
 
     // Simple task to handle incoming requests and send back default responses
@@ -321,4 +326,287 @@ async fn test_concurrent_sends() {
         success_count, num_tasks,
         "Not all concurrent tasks succeeded"
     );
+}
+
+#[tokio::test]
+async fn test_temporary_partition_and_heal() {
+    init_tracing();
+    let registry = Arc::new(TransportRegistry::new());
+    let mut node1 = TestNode::new(1, registry.clone()).await;
+    let mut node2 = TestNode::new(2, registry.clone()).await;
+    TestNode::spawn_responder_task(node2.take_receivers());
+
+    let req = AppendEntriesRequest {
+        leader_id: 1,
+        ..Default::default()
+    };
+
+    // 1. Partition 1 -> 2
+    node1.transport.partition_from(2).await;
+    let res_partitioned = node1.transport.send_append_entries(2, req.clone()).await;
+    assert!(
+        matches!(res_partitioned, Err(e) if e.downcast_ref::<TransportError>() == Some(&TransportError::Partitioned(1, 2)))
+    );
+    tracing::info!("Confirmed message blocked by partition");
+
+    // 2. Heal partition 1 -> 2
+    node1.transport.heal_partition_from(2).await;
+    tracing::info!("Partition healed");
+    sleep(Duration::from_millis(10)).await; // Give time for state changes if any
+
+    // 3. Send again (should succeed)
+    let res_healed = node1.transport.send_append_entries(2, req.clone()).await;
+    assert!(
+        res_healed.is_ok(),
+        "Send failed after partition heal: {:?}",
+        res_healed.err()
+    );
+    assert!(res_healed.unwrap().success);
+    tracing::info!("Confirmed message successful after heal");
+}
+
+#[tokio::test]
+async fn test_variable_delays_slow_node() {
+    init_tracing();
+    let registry = Arc::new(TransportRegistry::new());
+    let slow_delay = Duration::from_millis(150);
+    let normal_delay = Duration::from_millis(10);
+
+    // Node 1 sends slowly
+    let node1 = TestNode::new_with_options(
+        1,
+        NetworkOptions {
+            message_delay: Some(slow_delay),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .await;
+    // Node 2 sends normally
+    let node2 = TestNode::new_with_options(
+        2,
+        NetworkOptions {
+            message_delay: Some(normal_delay),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .await;
+    // Node 3 receives (no delay needed on receiver side for this test)
+    let mut node3 = TestNode::new(3, registry.clone()).await;
+    TestNode::spawn_responder_task(node3.take_receivers());
+
+    let req = AppendEntriesRequest {
+        ..Default::default()
+    };
+
+    // Measure slow send
+    let start1 = Instant::now();
+    let _ = node1
+        .transport
+        .send_append_entries(3, req.clone())
+        .await
+        .unwrap();
+    let elapsed1 = start1.elapsed();
+    tracing::info!(node = 1, ?elapsed1, expected_delay = ?slow_delay, "Measured slow send");
+    assert!(
+        elapsed1 >= slow_delay && elapsed1 < slow_delay * 3,
+        "Slow node delay out of bounds"
+    );
+
+    // Measure normal send
+    let start2 = Instant::now();
+    let _ = node2
+        .transport
+        .send_append_entries(3, req.clone())
+        .await
+        .unwrap();
+    let elapsed2 = start2.elapsed();
+    tracing::info!(node = 2, ?elapsed2, expected_delay = ?normal_delay, "Measured normal send");
+    assert!(
+        elapsed2 >= normal_delay && elapsed2 < normal_delay * 10,
+        "Normal node delay out of bounds"
+    ); // Wider margin for normal
+
+    assert!(
+        elapsed1 > elapsed2 * 3,
+        "Slow node was not significantly slower than normal node"
+    );
+}
+
+#[tokio::test]
+async fn test_asymmetric_partition() {
+    init_tracing();
+    let registry = Arc::new(TransportRegistry::new());
+    let mut node1 = TestNode::new(1, registry.clone()).await;
+    let mut node2 = TestNode::new(2, registry.clone()).await;
+    TestNode::spawn_responder_task(node1.take_receivers()); // Node 1 needs to respond to Node 2
+    TestNode::spawn_responder_task(node2.take_receivers()); // Node 2 needs to respond to Node 1 (when allowed)
+
+    let req = AppendEntriesRequest {
+        ..Default::default()
+    };
+
+    // Partition 1 -> 2 (but not 2 -> 1)
+    node1.transport.partition_from(2).await;
+    tracing::info!("Asymmetric partition 1->2 created");
+
+    // Send 1 -> 2 (should fail)
+    let res12 = node1.transport.send_append_entries(2, req.clone()).await;
+    assert!(
+        matches!(res12, Err(e) if e.downcast_ref::<TransportError>() == Some(&TransportError::Partitioned(1, 2))),
+        "Send 1->2 should be partitioned"
+    );
+    tracing::info!("Confirmed 1->2 send failed");
+
+    // Send 2 -> 1 (should succeed)
+    let res21 = node2.transport.send_append_entries(1, req.clone()).await;
+    assert!(res21.is_ok(), "Send 2->1 should succeed: {:?}", res21.err());
+    assert!(res21.unwrap().success);
+    tracing::info!("Confirmed 2->1 send succeeded");
+}
+
+#[tokio::test]
+async fn test_large_cluster_communication_5_nodes() {
+    init_tracing();
+    let registry = Arc::new(TransportRegistry::new());
+    let node_ids: Vec<NodeId> = (1..=5).collect();
+    let expected_successes = node_ids.len() * (node_ids.len() - 1);
+
+    // Run the main test logic within a spawned task to control lifetime
+    let test_task = tokio::spawn(async move {
+        let mut nodes: Vec<TestNode> = Vec::new(); // Store TestNode instances
+
+        // Create nodes and spawn responders
+        for id in &node_ids {
+            let mut node = TestNode::new(*id, registry.clone()).await;
+            TestNode::spawn_responder_task(node.take_receivers());
+            nodes.push(node); // Push the whole TestNode
+        }
+
+        let req = AppendEntriesRequest {
+            term: 1,
+            ..Default::default()
+        };
+        let mut handles = Vec::new();
+
+        // Each node sends to all other nodes
+        for i in 0..nodes.len() {
+            let sender_transport = nodes[i].transport.clone();
+            let sender_id = node_ids[i];
+            for j in 0..nodes.len() {
+                if i == j {
+                    continue;
+                }
+                let receiver_id = node_ids[j];
+                let transport = sender_transport.clone();
+                let request = AppendEntriesRequest {
+                    leader_id: sender_id,
+                    ..req.clone()
+                };
+                handles.push(tokio::spawn(async move {
+                    transport.send_append_entries(receiver_id, request).await
+                }));
+            }
+        }
+
+        let results = futures::future::join_all(handles).await;
+        let mut success_count = 0;
+
+        for result in results {
+            match result {
+                Ok(Ok(resp)) if resp.success => success_count += 1,
+                Ok(Ok(resp)) => {
+                    tracing::error!(?resp, "Request succeeded but response indicated failure")
+                }
+                Ok(Err(e)) => tracing::error!(error = ?e, "Send failed unexpectedly"),
+                Err(e) => tracing::error!(error = ?e, "Task panicked"),
+            }
+        }
+
+        assert_eq!(
+            success_count, expected_successes,
+            "Not all messages in 5-node cluster succeeded"
+        );
+        tracing::info!(
+            sent = expected_successes,
+            received = success_count,
+            "Completed 5-node communication test"
+        );
+
+        // Explicitly close transports after awaiting results
+        for node in nodes {
+            node.close();
+        }
+
+        success_count // Return success count for final assertion
+    });
+
+    // Wait for the test task to complete
+    let final_success_count = test_task.await.expect("Test task panicked");
+    assert_eq!(
+        final_success_count, expected_successes,
+        "Final assertion failed: Not all messages succeeded"
+    );
+}
+
+#[tokio::test]
+async fn test_receiver_dropped_before_response() {
+    init_tracing();
+    let registry = Arc::new(TransportRegistry::new());
+
+    let node1 = TestNode::new(1, registry.clone()).await;
+    let mut node2 = TestNode::new(2, registry.clone()).await;
+
+    // Take receivers but DON'T spawn a responder task
+    let node2_receivers = node2.take_receivers();
+
+    let req = AppendEntriesRequest {
+        leader_id: 1,
+        ..Default::default()
+    };
+
+    // Spawn a task to drop the receivers after a short delay, while node 1 is sending/waiting
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(50)).await;
+        drop(node2_receivers);
+        tracing::info!("Node 2 receivers dropped");
+    });
+
+    // Send from node 1 - this should eventually error out
+    let start = Instant::now();
+    let send_timeout = Duration::from_millis(200); // Set a reasonable timeout
+
+    let result =
+        tokio::time::timeout(send_timeout, node1.transport.send_append_entries(2, req)).await;
+    let elapsed = start.elapsed();
+    tracing::info!(?elapsed, "Send attempt finished");
+
+    match result {
+        Ok(Ok(resp)) => {
+            // Unexpected success!
+            panic!(
+                "Send unexpectedly succeeded after receiver drop: {:?}",
+                resp
+            );
+        }
+        Ok(Err(inner_err)) => {
+            // Send failed before timeout, as expected.
+            tracing::info!(error = ?inner_err, "Send failed before timeout as expected");
+            assert!(
+                matches!(
+                    inner_err.downcast_ref::<TransportError>(),
+                    Some(TransportError::RecvError(2)) | Some(TransportError::SendError(..))
+                ),
+                "Expected RecvError(2) or SendError after receiver drop, but got: {:?}",
+                inner_err
+            );
+        }
+        Err(_elapsed_error) => {
+            // Timeout elapsed.
+            panic!(
+                "Send blocked indefinitely until timeout, expected quicker error after receiver drop."
+            );
+        }
+    }
 }

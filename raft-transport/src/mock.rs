@@ -100,14 +100,6 @@ pub struct MockTransport {
     registry: Arc<TransportRegistry>,
 }
 
-impl Drop for MockTransport {
-    fn drop(&mut self) {
-        self.registry.unregister(self.node_id);
-        // Note: Tracing in drop might be unreliable depending on shutdown order
-        // tracing::debug!(node_id = self.node_id, "MockTransport dropped and unregistered");
-    }
-}
-
 impl MockTransport {
     /// Creates a new MockTransport with specific network simulation options
     /// and registers it with the provided registry.
@@ -139,6 +131,16 @@ impl MockTransport {
 
         tracing::debug!(node_id, "MockTransport created and registered");
         (transport, receivers)
+    }
+
+    /// Explicitly unregisters the transport from its registry.
+    /// Call this at the end of tests to ensure cleanup.
+    pub fn close(&self) {
+        self.registry.unregister(self.node_id);
+        tracing::debug!(
+            node_id = self.node_id,
+            "MockTransport closed and unregistered"
+        );
     }
 
     /// Updates the network simulation options for this transport.

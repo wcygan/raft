@@ -424,9 +424,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "futures",
  "raft-core",
+ "rand",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wcygan_raft_community_neoeinstein-prost",
 ]
 

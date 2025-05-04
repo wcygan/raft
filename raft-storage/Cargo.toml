@@ -14,3 +14,6 @@ wcygan_raft_community_neoeinstein-prost = { workspace = true } # For LogEntry ty
 [dev-dependencies]
 # Add dev dependencies if needed for tests, e.g., specific tokio features
 bytes = { workspace = true } # Needed for test helper `create_entry`
+futures = { workspace = true }
+rand = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] } # For enabling logs in tests

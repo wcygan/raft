@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     HardState as ProstHardState, LogEntry as ProstLogEntry,
-};
+}; // For concurrency tests
 
 /// Internal state for InMemoryStorage, protected by a Mutex.
 #[derive(Debug, Clone, Default)]
@@ -62,59 +62,77 @@ impl Storage for InMemoryStorage {
         let mut inner = self.inner.lock().await;
         let first_new_index = entries.first().map(|e| e.index).unwrap_or(0);
         let last_new_index = entries.last().map(|e| e.index).unwrap_or(0);
+
+        // Get the index of the last entry currently in the log, or 0 if empty.
+        let last_current_index = inner.log.last().map_or(0, |e| e.index);
+
         tracing::debug!(
             count = entries.len(),
             first_index = first_new_index,
             last_index = last_new_index,
+            last_current_log_index = last_current_index,
+            current_log_vec = ?inner.log, // Log current log vec state
             "Appending log entries"
         );
 
-        // Basic validation: Ensure incoming entries have consecutive indices
-        // More robust validation (term checks) should happen in the core Raft logic
+        // Validation: Ensure incoming entries have consecutive indices
         for i in 1..entries.len() {
             if entries[i].index != entries[i - 1].index + 1 {
-                // This indicates a potential gap or overlap, which shouldn't happen
-                // if the Raft logic correctly prepares the entries slice.
-                // We could panic or return an error, but tracing might be sufficient for now.
                 tracing::error!(
                     prev_index = entries[i - 1].index,
                     current_index = entries[i].index,
                     "Non-consecutive log entry indices detected during append"
                 );
-                // Depending on strictness, might return Err(...) here.
+                return Err(anyhow::anyhow!("Non-consecutive log entries"));
             }
         }
 
-        // Check if the new entries overwrite existing ones
-        if let Some(first_entry) = entries.first() {
-            let log_len = inner.log.len() as u64;
-            // Raft indices are 1-based
-            let start_index_0based = (first_entry.index.saturating_sub(1)) as usize;
-
-            if first_entry.index <= log_len {
-                // Overwriting existing entries
+        // Check for overwrite or gap based on absolute indices
+        if first_new_index <= last_current_index {
+            // Overwriting or potentially conflicting entries
+            // Find the position in the Vec where the new entries *start* to conflict or overwrite
+            if let Some(conflict_pos) = inner.log.iter().position(|e| e.index >= first_new_index) {
                 tracing::warn!(
-                    overwrite_start_index = first_entry.index,
-                    current_log_len = log_len,
-                    "Overwriting existing log entries"
+                    overwrite_start_index = first_new_index,
+                    current_last_log_index = last_current_index,
+                    log_vec_len = inner.log.len(),
+                    conflict_at_vec_pos = conflict_pos,
+                    conflicting_entry_index = inner.log[conflict_pos].index,
+                    conflicting_entry_term = inner.log[conflict_pos].term,
+                    first_new_entry_term = entries[0].term,
+                    "Overwriting or conflicting log entries detected starting at index {}",
+                    first_new_index
                 );
-                // Truncate the existing log from the point of the first new entry
-                inner.log.truncate(start_index_0based);
-            } else if first_entry.index > log_len + 1 {
-                // Gap detected! The Raft protocol should prevent this.
+                // Term check: Raft dictates we only overwrite if the term is >= existing entry's term
+                // For simplicity here, we assume Raft core logic handles this check before calling append.
+                // We will truncate from the conflict point onwards.
+                inner.log.truncate(conflict_pos);
+            } else {
+                // This case should ideally not happen if first_new_index <= last_current_index
+                // but indicates an inconsistency if it does.
                 tracing::error!(
-                    first_new_index = first_entry.index,
-                    log_len = log_len,
-                    "Gap detected between existing log and new entries"
+                    first_new_index,
+                    last_current_index,
+                    "Log inconsistency: first_new_index <= last_current_index, but no conflict position found."
                 );
-                // Return an error or handle as appropriate for Raft invariants
-                return Err(anyhow::anyhow!(
-                    "Gap detected between log end ({}) and new entries starting at {}",
-                    log_len,
-                    first_entry.index
-                ));
+                // Depending on desired strictness, could return an error.
+                // For now, let's clear the log assuming a major inconsistency.
+                inner.log.clear();
             }
+        } else if first_new_index > last_current_index + 1 {
+            // Gap detected!
+            tracing::error!(
+                first_new_index,
+                last_current_log_index = last_current_index,
+                "Gap detected between existing log end and new entries"
+            );
+            return Err(anyhow::anyhow!(
+                "Gap detected between log end ({}) and new entries starting at {}",
+                last_current_index,
+                first_new_index
+            ));
         }
+        // If first_new_index == last_current_index + 1, it's a direct append, no truncation needed.
 
         inner.log.extend_from_slice(entries);
         Ok(())
@@ -187,60 +205,66 @@ impl Storage for InMemoryStorage {
             return Ok(());
         }
 
-        // Find the position (Vec index) of the first entry to keep.
-        // We keep entries with absolute index >= end_index_exclusive.
-        let keep_from_pos = inner
-            .log
-            .iter()
-            .position(|entry| entry.index >= end_index_exclusive);
+        // Use retain to keep only entries with index >= end_index_exclusive
+        let original_len = inner.log.len();
+        inner.log.retain(|entry| entry.index >= end_index_exclusive);
+        let new_len = inner.log.len();
 
-        match keep_from_pos {
-            Some(pos) => {
-                // Found the first entry to keep at Vec index `pos`.
-                // Drain all elements before this position.
-                tracing::debug!(
-                    "Found first entry to keep (index {}) at Vec position {}, draining prefix.",
-                    inner.log[pos].index,
-                    pos
-                );
-                inner.log.drain(..pos);
-            }
-            None => {
-                // No entry has index >= end_index_exclusive.
-                // This means we should remove *all* entries.
-                tracing::debug!(
-                    "No entry found with index >= {}, clearing log.",
-                    end_index_exclusive
-                );
-                inner.log.clear();
-            }
-        }
+        tracing::debug!(
+            removed_count = original_len - new_len,
+            new_len = inner.log.len(),
+            first_index = inner.log.first().map(|e| e.index),
+            last_index = inner.log.last().map(|e| e.index),
+            "Log after truncate_prefix using retain"
+        );
 
         Ok(())
     }
 
     async fn truncate_log_suffix(&mut self, start_index_inclusive: u64) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        // Indices are 1-based, inclusive start
-        // We want to keep entries UP TO (but not including) start_index_inclusive.
         tracing::debug!(
             start_index_inclusive,
             current_len = inner.log.len(),
-            "Truncating log suffix"
+            first_index = inner.log.first().map(|e| e.index),
+            last_index = inner.log.last().map(|e| e.index),
+            "Truncating log suffix (keeping < index {})",
+            start_index_inclusive
         );
+
         if start_index_inclusive == 0 {
-            // Not a valid 1-based index, interpret as truncating everything? Or error?
-            // Let's treat 0 or 1 as truncating everything *before* index 1 (i.e., keep nothing).
             tracing::warn!("Truncate suffix called with index 0, clearing log.");
             inner.log.clear();
             return Ok(());
         }
 
-        let truncate_at_0based = (start_index_inclusive.saturating_sub(1)) as usize;
-        if truncate_at_0based < inner.log.len() {
-            inner.log.truncate(truncate_at_0based);
+        // Find the Vec position of the first entry to *remove*
+        // (i.e., the first entry with index >= start_index_inclusive).
+        let truncate_at_pos = inner
+            .log
+            .iter()
+            .position(|entry| entry.index >= start_index_inclusive);
+
+        match truncate_at_pos {
+            Some(pos) => {
+                tracing::debug!(
+                    "Found first entry to remove (index {}) at Vec position {}, truncating suffix.",
+                    inner.log[pos].index,
+                    pos
+                );
+                // truncate() keeps elements *before* the given Vec index.
+                inner.log.truncate(pos);
+            }
+            None => {
+                // No entry with index >= start_index_inclusive found.
+                // This means we should keep *all* existing entries.
+                tracing::debug!(
+                    "No entry found with index >= {}, keeping all entries.",
+                    start_index_inclusive
+                );
+                // Do nothing, log remains unchanged.
+            }
         }
-        // If truncate_at_0based >= len, truncate does nothing, which is correct.
         Ok(())
     }
 
@@ -267,7 +291,10 @@ impl Storage for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Place imports needed only for tests here
     use bytes::Bytes;
+    use futures::future::join_all;
+    // use rand::Rng; // Keep rand commented if not used after simplifying reader test
 
     fn create_entry(index: u64, term: u64) -> ProstLogEntry {
         ProstLogEntry {
@@ -639,5 +666,309 @@ mod tests {
         assert_eq!(final_log[0].index, 1);
         assert_eq!(final_log[1].index, 2); // Should be from entries2
         assert_eq!(final_log[2].index, 3);
+    }
+
+    // --- Concurrency Tests ---
+
+    #[tokio::test]
+    async fn test_concurrent_append_read() {
+        let storage = InMemoryStorage::new();
+        let num_writers = 5;
+        let entries_per_writer = 10;
+        let mut handles = Vec::new();
+
+        // Spawn writer tasks
+        for i in 0..num_writers {
+            let mut storage_clone = storage.clone();
+            let handle = tokio::spawn(async move {
+                let start_index = i * entries_per_writer + 1;
+                let entries: Vec<_> = (start_index..start_index + entries_per_writer)
+                    .map(|idx| create_entry(idx, i + 1)) // Vary term per writer
+                    .collect();
+                // Introduce slight delay to increase chance of interleaving
+                tokio::time::sleep(tokio::time::Duration::from_millis(i * 2)).await;
+                storage_clone.append_log_entries(&entries).await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for writers to complete
+        let write_results = join_all(handles).await;
+        for result in write_results {
+            result.unwrap().expect("Concurrent append failed");
+        }
+
+        let total_entries = num_writers * entries_per_writer;
+        assert_eq!(storage.last_log_index().await.unwrap(), total_entries);
+
+        // Spawn reader tasks
+        let num_readers = 10;
+        handles = Vec::new(); // Re-initialize handles after move into join_all for writers
+        for reader_id in 0..num_readers {
+            let storage_clone = storage.clone();
+            let handle = tokio::spawn(async move {
+                // Simplified read: Read first and last entry
+                let first_entry = storage_clone.read_log_entry(1).await;
+                let last_entry = storage_clone.read_log_entry(total_entries).await;
+
+                // Basic check that reads don't error out unexpectedly
+                if first_entry.is_err() || last_entry.is_err() {
+                    tracing::error!(reader = reader_id, "Concurrent read failed");
+                    return Err(anyhow::anyhow!(
+                        "Concurrent read failed for reader {}",
+                        reader_id
+                    ));
+                }
+                if first_entry.unwrap().is_none() && total_entries > 0 {
+                    tracing::error!(
+                        reader = reader_id,
+                        "First entry None when log should not be empty"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Reader {} found None for first entry",
+                        reader_id
+                    ));
+                }
+                if last_entry.unwrap().is_none() && total_entries > 0 {
+                    tracing::error!(
+                        reader = reader_id,
+                        "Last entry None when log should not be empty"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Reader {} found None for last entry",
+                        reader_id
+                    ));
+                }
+
+                Ok::<(), anyhow::Error>(())
+            });
+            handles.push(handle);
+        }
+
+        // Wait for readers
+        let read_results = join_all(handles).await;
+        assert!(
+            read_results
+                .into_iter()
+                .all(|r| r.is_ok() && r.unwrap().is_ok()),
+            "Read tasks failed"
+        );
+
+        // Final verification: Read all entries and check consistency (e.g., indices)
+        let all_read = storage
+            .read_log_entries(1, total_entries + 1)
+            .await
+            .unwrap();
+        assert_eq!(all_read.len() as u64, total_entries);
+        for (i, entry) in all_read.iter().enumerate() {
+            assert_eq!(entry.index, (i + 1) as u64, "Index mismatch at pos {}", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_truncate() {
+        let mut storage = InMemoryStorage::new();
+        let initial_entries = (1..=100).map(|i| create_entry(i, 1)).collect::<Vec<_>>();
+        storage.append_log_entries(&initial_entries).await.unwrap();
+
+        let mut handles = Vec::new();
+
+        // Task 1: Truncate suffix from 51 (keeps 1-50)
+        let mut storage_clone1 = storage.clone();
+        handles.push(tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            storage_clone1.truncate_log_suffix(51).await
+        }));
+
+        // Task 2: Truncate prefix before 21 (keeps >= 21)
+        let mut storage_clone2 = storage.clone();
+        handles.push(tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await; // Try to run before suffix truncate
+            storage_clone2.truncate_log_prefix(21).await
+        }));
+
+        // Task 3: Read last index concurrently
+        let storage_clone3 = storage.clone();
+        handles.push(tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+            // Try to read after potential truncations
+            let _ = storage_clone3.last_log_index().await.unwrap();
+            Ok(())
+        }));
+
+        let results = join_all(handles).await;
+        for result in results {
+            result.unwrap().expect("Concurrent truncate/read failed");
+        }
+
+        // Verification depends on the exact interleaving, which is hard to guarantee.
+        // The main goal is to ensure no deadlocks or panics.
+        // We can check if the state is *one* of the possible outcomes.
+
+        let final_log = storage.read_log_entries(1, 101).await.unwrap();
+        let final_indices: Vec<u64> = final_log.iter().map(|e| e.index).collect();
+
+        // Possible outcome 1: Prefix runs first, then Suffix
+        // Initial: [1..100]
+        // After Prefix(21): [21..100]
+        // After Suffix(51) on [21..100]: [21..50]
+        let outcome1: Vec<u64> = (21..=50).collect();
+
+        // Possible outcome 2: Suffix runs first, then Prefix
+        // ... (removed outcome2 logic as it was identical and unused) ...
+        // let _outcome2: Vec<u64> = (21..=50).collect();
+
+        // In this specific case, both outcomes lead to [21..50].
+        assert_eq!(final_indices, outcome1, "Final log state mismatch");
+        assert_eq!(storage.last_log_index().await.unwrap(), 50);
+        assert_eq!(
+            storage.read_hard_state().await.unwrap(),
+            ProstHardState::default(),
+            "Hard state shouldn't be affected"
+        );
+    }
+
+    // --- Log Manipulation Edge Cases ---
+    #[tokio::test]
+    async fn test_append_empty_slice() {
+        let mut storage = InMemoryStorage::new();
+        let result = storage.append_log_entries(&[]).await;
+        assert!(result.is_ok());
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_read_empty_log() {
+        let storage = InMemoryStorage::new();
+        assert!(storage.read_log_entry(1).await.unwrap().is_none());
+        assert!(storage.read_log_entries(1, 10).await.unwrap().is_empty());
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+        assert_eq!(storage.last_log_term().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_truncate_empty_log() {
+        let mut storage = InMemoryStorage::new();
+        assert!(storage.truncate_log_prefix(1).await.is_ok());
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+        assert!(storage.truncate_log_prefix(100).await.is_ok());
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+
+        assert!(storage.truncate_log_suffix(0).await.is_ok()); // Should clear (already empty)
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+        assert!(storage.truncate_log_suffix(1).await.is_ok());
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+        assert!(storage.truncate_log_suffix(100).await.is_ok());
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_truncate_prefix_all() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+        // Scenario: Start with log [1..6], truncate before 7 (no-op),
+        // then truncate before 5 (leaves [5, 6]), then truncate before 7 again (clears).
+        let mut storage = InMemoryStorage::new();
+        let initial_entries = (1..=6).map(|i| create_entry(i, 1)).collect::<Vec<_>>();
+        storage.append_log_entries(&initial_entries).await.unwrap();
+        assert_eq!(storage.last_log_index().await.unwrap(), 6);
+
+        // Test truncating just beyond the last index - should clear the log
+        storage.truncate_log_prefix(7).await.unwrap(); // Keep >= 7. Removes 1..6.
+        assert_eq!(
+            storage.last_log_index().await.unwrap(),
+            0,
+            "Log should be empty after truncate(7)"
+        ); // Expect 0
+        assert!(storage.read_log_entry(1).await.unwrap().is_none());
+        assert!(storage.read_log_entry(6).await.unwrap().is_none());
+        assert!(
+            storage.inner.lock().await.log.is_empty(),
+            "Inner log vec size should be 0 after truncate(7)"
+        );
+
+        // Now truncate before index 5 on the *empty* log - should be no-op
+        storage.truncate_log_prefix(5).await.unwrap(); // Keep >= 5.
+        assert_eq!(
+            storage.last_log_index().await.unwrap(),
+            0,
+            "Log should still be empty after truncate(5)"
+        );
+        assert!(
+            storage.inner.lock().await.log.is_empty(),
+            "Inner log vec size after truncate(5)"
+        );
+
+        // Now truncate before index 7 again on the *empty* log - should be no-op
+        storage.truncate_log_prefix(7).await.unwrap(); // Keep >= 7.
+        assert_eq!(
+            storage.last_log_index().await.unwrap(),
+            0,
+            "Log should be empty after truncate(7) again"
+        );
+        assert!(
+            storage.inner.lock().await.log.is_empty(),
+            "Inner log vec empty after truncate(7) again"
+        );
+
+        // Test truncating an already empty log far beyond index 0
+        storage.truncate_log_prefix(100).await.unwrap(); // Should be no-op on empty log
+        assert_eq!(
+            storage.last_log_index().await.unwrap(),
+            0,
+            "Log should still be empty after truncate(100)"
+        );
+        assert!(
+            storage.inner.lock().await.log.is_empty(),
+            "Inner log vec should still be empty after truncate(100)"
+        );
+
+        // Now, test appending to the empty log (should work if starting at index 1)
+        let entries_from_1 = vec![create_entry(1, 2), create_entry(2, 2)];
+        storage.append_log_entries(&entries_from_1).await.unwrap();
+        assert_eq!(storage.last_log_index().await.unwrap(), 2);
+        assert_eq!(storage.read_log_entry(1).await.unwrap().unwrap().term, 2);
+
+        // Appending entries with a gap should still fail
+        let entries_with_gap = vec![create_entry(5, 3)];
+        let result = storage.append_log_entries(&entries_with_gap).await;
+        assert!(result.is_err(), "Appending with gap should fail");
+        // Explicitly check the error content
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Gap detected between log end (2) and new entries starting at 5"),
+            "Incorrect gap error message: {}",
+            err
+        );
+        assert_eq!(
+            storage.last_log_index().await.unwrap(),
+            2,
+            "Log should be unchanged after gap error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_truncate_prefix_then_append() {
+        // Scenario: [1,2,3,4,5] -> truncate_prefix(3) -> [3,4,5] -> append([6,7]) -> [3,4,5,6,7]
+        let mut storage = InMemoryStorage::new();
+        let initial = (1..=5).map(|i| create_entry(i, 1)).collect::<Vec<_>>();
+        storage.append_log_entries(&initial).await.unwrap();
+
+        storage.truncate_log_prefix(3).await.unwrap(); // Keep >= 3 => [3, 4, 5]
+        assert_eq!(storage.last_log_index().await.unwrap(), 5);
+        assert!(storage.read_log_entry(2).await.unwrap().is_none());
+        assert!(storage.read_log_entry(3).await.unwrap().is_some());
+
+        let next_entries = vec![create_entry(6, 2), create_entry(7, 2)];
+        storage.append_log_entries(&next_entries).await.unwrap();
+
+        assert_eq!(storage.last_log_index().await.unwrap(), 7);
+        assert_eq!(storage.last_log_term().await.unwrap(), 2);
+
+        let final_log = storage.read_log_entries(1, 8).await.unwrap();
+        assert_eq!(final_log.len(), 5); // Should contain 3, 4, 5, 6, 7
+        assert_eq!(final_log[0].index, 3);
+        assert_eq!(final_log[4].index, 7);
     }
 }
