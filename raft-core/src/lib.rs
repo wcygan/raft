@@ -1,17 +1,14 @@
+use anyhow::Result;
+use async_trait::async_trait;
 use std::collections::HashMap;
+
+use wcygan_raft_community_neoeinstein_prost::raft::v1::{
+    AppendEntriesRequest, AppendEntriesResponse, HardState, LogEntry, RequestVoteRequest,
+    RequestVoteResponse,
+};
 
 /// Represents a unique identifier for a node in the Raft cluster.
 pub type NodeId = u64;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogEntry {
-    /// The term number of the leader that sent this entry
-    pub term: u64,
-    /// The index of the log entry in the leader's log
-    pub index: u64,
-    /// The command to be applied to the state machine
-    pub command: String,
-}
 
 /// Represents the configuration of the Raft node, including parameters like heartbeat interval, election timeout, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,22 +34,9 @@ pub enum Role {
     Leader,
 }
 
-/// Persistent state that must be saved to stable storage before responding to RPCs
-#[derive(Debug, Clone)]
-pub struct PersistentState {
-    /// The current term of the node
-    pub current_term: u64,
-    /// The ID of the candidate that received vote in the current term
-    pub voted_for: Option<NodeId>,
-    /// The log entries, each containing a term and command
-    pub log: Vec<LogEntry>,
-}
-
 /// Volatile state maintained on all servers but not persisted
 #[derive(Debug, Clone)]
 pub struct VolatileState {
-    /// The index of the highest log entry known to be committed
-    pub commit_index: u64,
     /// The index of the highest log entry applied to the state machine
     pub last_applied: u64,
 }
@@ -77,9 +61,15 @@ pub struct ServerState {
 /// Represents the complete state of a Raft node
 #[derive(Debug, Clone)]
 pub struct RaftState {
-    pub persistent: PersistentState,
+    /// The hard state that must be persisted to stable storage
+    pub hard_state: HardState,
+    /// The log entries, each containing a term and command
+    pub log: Vec<LogEntry>,
+    /// Volatile state maintained on all servers
     pub volatile: VolatileState,
+    /// Leader-specific state
     pub leader: LeaderState,
+    /// Implementation-specific server state
     pub server: ServerState,
 }
 
@@ -87,15 +77,13 @@ impl RaftState {
     /// Creates a new RaftState with default values.
     pub fn new() -> Self {
         RaftState {
-            persistent: PersistentState {
-                current_term: 0,
-                voted_for: None,
-                log: Vec::new(),
-            },
-            volatile: VolatileState {
+            hard_state: HardState {
+                term: 0,
+                voted_for: 0, // 0 means no vote cast (assuming NodeId 0 is not valid)
                 commit_index: 0,
-                last_applied: 0,
             },
+            log: Vec::new(),
+            volatile: VolatileState { last_applied: 0 },
             leader: LeaderState {
                 next_index: HashMap::new(),
                 match_index: HashMap::new(),
@@ -108,12 +96,73 @@ impl RaftState {
 }
 
 // Forward declarations for traits (assuming they are defined elsewhere in raft-core)
-pub trait Storage {}
-pub trait Transport {}
+// pub trait Storage {}
+// pub trait Transport {}
+
+/// Trait defining the persistent storage operations required by Raft.
+#[async_trait]
+pub trait Storage {
+    /// Saves the Raft node's hard state (term, voted_for, commit_index).
+    async fn save_hard_state(&mut self, state: &HardState) -> Result<()>;
+
+    /// Reads the persisted hard state.
+    async fn read_hard_state(&self) -> Result<HardState>;
+
+    /// Appends a slice of log entries to the storage.
+    /// It's the implementation's responsibility to ensure consistency.
+    async fn append_log_entries(&mut self, entries: &[LogEntry]) -> Result<()>;
+
+    /// Reads a single log entry by its index.
+    async fn read_log_entry(&self, index: u64) -> Result<Option<LogEntry>>;
+
+    /// Reads log entries within a given range (inclusive start, exclusive end).
+    async fn read_log_entries(&self, start_index: u64, end_index: u64) -> Result<Vec<LogEntry>>;
+
+    /// Deletes log entries *before* the given index (exclusive).
+    async fn truncate_log_prefix(&mut self, end_index_exclusive: u64) -> Result<()>;
+
+    /// Deletes log entries *after* the given index (inclusive).
+    async fn truncate_log_suffix(&mut self, start_index_inclusive: u64) -> Result<()>;
+
+    /// Returns the index of the last entry in the log.
+    async fn last_log_index(&self) -> Result<u64>;
+
+    /// Returns the term of the last entry in the log.
+    async fn last_log_term(&self) -> Result<u64>;
+
+    // TODO: Add methods for snapshotting
+    // async fn save_snapshot(&mut self, snapshot: &[u8], last_included_index: u64, last_included_term: u64) -> Result<()>;
+    // async fn read_snapshot(&self) -> Result<Option<(Vec<u8>, u64, u64)>>;
+}
+
+/// Trait defining the network transport operations required by Raft.
+#[async_trait]
+pub trait Transport {
+    /// Sends an AppendEntries RPC to a specific peer.
+    async fn send_append_entries(
+        &self,
+        peer_id: NodeId,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse>;
+
+    /// Sends a RequestVote RPC to a specific peer.
+    async fn send_request_vote(
+        &self,
+        peer_id: NodeId,
+        request: RequestVoteRequest,
+    ) -> Result<RequestVoteResponse>;
+
+    // TODO: Add method for InstallSnapshot RPC
+    // async fn send_install_snapshot(
+    //     &self,
+    //     peer_id: NodeId,
+    //     request: InstallSnapshotRequest,
+    // ) -> Result<InstallSnapshotResponse>;
+}
 
 /// The main Raft node structure, encapsulating state and logic.
 /// Generic over Storage and Transport implementations.
-pub struct RaftNode<S: Storage, T: Transport> {
+pub struct RaftNode<S: Storage + Send + Sync + 'static, T: Transport + Send + Sync + 'static> {
     /// The ID of the node
     pub id: NodeId,
     /// The current state of the Raft node
@@ -129,18 +178,25 @@ pub struct RaftNode<S: Storage, T: Transport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use wcygan_raft_community_neoeinstein_prost::raft::v1::{
+        AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    };
 
     #[test]
     fn test_raft_state_new() {
         let state = RaftState::new();
 
-        // Verify persistent state defaults
-        assert_eq!(state.persistent.current_term, 0);
-        assert_eq!(state.persistent.voted_for, None);
-        assert!(state.persistent.log.is_empty());
+        // Verify hard state defaults
+        assert_eq!(state.hard_state.term, 0);
+        assert_eq!(state.hard_state.voted_for, 0); // No vote cast
+        assert_eq!(state.hard_state.commit_index, 0);
+
+        // Verify log defaults
+        assert!(state.log.is_empty());
 
         // Verify volatile state defaults
-        assert_eq!(state.volatile.commit_index, 0);
         assert_eq!(state.volatile.last_applied, 0);
 
         // Verify leader state defaults
@@ -149,5 +205,192 @@ mod tests {
 
         // Verify server state defaults
         assert_eq!(state.server.role, Role::Follower);
+    }
+
+    // --- Mock Storage Implementation ---
+    #[derive(Debug, Clone, Default)]
+    struct MockStorageInner {
+        hard_state: HardState,
+        log: Vec<LogEntry>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct MockStorage {
+        inner: Arc<Mutex<MockStorageInner>>,
+    }
+
+    #[async_trait]
+    impl Storage for MockStorage {
+        async fn save_hard_state(&mut self, state: &HardState) -> Result<()> {
+            let mut inner = self.inner.lock().await;
+            inner.hard_state = state.clone();
+            Ok(())
+        }
+
+        async fn read_hard_state(&self) -> Result<HardState> {
+            let inner = self.inner.lock().await;
+            Ok(inner.hard_state.clone())
+        }
+
+        async fn append_log_entries(&mut self, entries: &[LogEntry]) -> Result<()> {
+            let mut inner = self.inner.lock().await;
+            inner.log.extend_from_slice(entries);
+            Ok(())
+        }
+
+        async fn read_log_entry(&self, index: u64) -> Result<Option<LogEntry>> {
+            let inner = self.inner.lock().await;
+            // Log indices are 1-based
+            if index == 0 || index > inner.log.len() as u64 {
+                return Ok(None);
+            }
+            Ok(inner.log.get((index - 1) as usize).cloned())
+        }
+
+        async fn read_log_entries(
+            &self,
+            start_index: u64,
+            end_index: u64,
+        ) -> Result<Vec<LogEntry>> {
+            let inner = self.inner.lock().await;
+            // Indices are 1-based, range is exclusive end
+            let start = (start_index.max(1) - 1) as usize;
+            let end = (end_index.max(1) - 1) as usize;
+            if start >= inner.log.len() || start > end {
+                return Ok(Vec::new());
+            }
+            let actual_end = end.min(inner.log.len());
+            Ok(inner.log[start..actual_end].to_vec())
+        }
+
+        async fn truncate_log_prefix(&mut self, end_index_exclusive: u64) -> Result<()> {
+            let mut inner = self.inner.lock().await;
+            // Indices are 1-based, exclusive end
+            let keep_from = (end_index_exclusive.max(1) - 1) as usize;
+            if keep_from >= inner.log.len() {
+                inner.log.clear();
+            } else {
+                inner.log = inner.log.split_off(keep_from);
+            }
+            Ok(())
+        }
+
+        async fn truncate_log_suffix(&mut self, start_index_inclusive: u64) -> Result<()> {
+            let mut inner = self.inner.lock().await;
+            // Indices are 1-based, inclusive start
+            if start_index_inclusive == 0 {
+                inner.log.clear();
+                return Ok(());
+            }
+            let truncate_at = (start_index_inclusive - 1) as usize;
+            if truncate_at < inner.log.len() {
+                inner.log.truncate(truncate_at);
+            }
+            Ok(())
+        }
+
+        async fn last_log_index(&self) -> Result<u64> {
+            let inner = self.inner.lock().await;
+            Ok(inner.log.len() as u64)
+        }
+
+        async fn last_log_term(&self) -> Result<u64> {
+            let inner = self.inner.lock().await;
+            Ok(inner.log.last().map_or(0, |entry| entry.term))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_storage_basic() {
+        let mut storage = MockStorage::default();
+        let initial_state = storage.read_hard_state().await.unwrap();
+        assert_eq!(initial_state.term, 0);
+        assert_eq!(initial_state.voted_for, 0);
+        assert_eq!(initial_state.commit_index, 0);
+
+        let new_state = HardState {
+            term: 1,
+            voted_for: 1,
+            commit_index: 0,
+        };
+        storage.save_hard_state(&new_state).await.unwrap();
+
+        let read_state = storage.read_hard_state().await.unwrap();
+        assert_eq!(read_state.term, 1);
+        assert_eq!(read_state.voted_for, 1);
+        assert_eq!(read_state.commit_index, 0);
+
+        let entries = vec![
+            LogEntry {
+                index: 1,
+                term: 1,
+                command: vec![1].into(),
+            },
+            LogEntry {
+                index: 2,
+                term: 1,
+                command: vec![2].into(),
+            },
+        ];
+        storage.append_log_entries(&entries).await.unwrap();
+
+        assert_eq!(storage.last_log_index().await.unwrap(), 2);
+        assert_eq!(storage.last_log_term().await.unwrap(), 1);
+
+        let entry1 = storage.read_log_entry(1).await.unwrap().unwrap();
+        assert_eq!(entry1.index, 1);
+
+        storage.truncate_log_suffix(2).await.unwrap(); // Keep entry 1
+        assert_eq!(storage.last_log_index().await.unwrap(), 1);
+        assert!(storage.read_log_entry(2).await.unwrap().is_none());
+
+        storage.truncate_log_prefix(1).await.unwrap(); // Remove nothing (index 1 exclusive)
+        assert_eq!(storage.last_log_index().await.unwrap(), 1);
+        storage.truncate_log_prefix(2).await.unwrap(); // Remove entry 1
+        assert_eq!(storage.last_log_index().await.unwrap(), 0);
+    }
+
+    // --- Mock Transport Implementation ---
+    #[derive(Debug, Clone, Default)]
+    struct MockTransport;
+
+    #[async_trait]
+    impl Transport for MockTransport {
+        async fn send_append_entries(
+            &self,
+            _peer_id: NodeId,
+            _request: AppendEntriesRequest,
+        ) -> Result<AppendEntriesResponse> {
+            // In a real mock, you might record calls or return programmed responses
+            Ok(AppendEntriesResponse {
+                term: 0,
+                success: false,
+                match_index: 0,
+            })
+        }
+
+        async fn send_request_vote(
+            &self,
+            _peer_id: NodeId,
+            _request: RequestVoteRequest,
+        ) -> Result<RequestVoteResponse> {
+            // In a real mock, you might record calls or return programmed responses
+            Ok(RequestVoteResponse {
+                term: 0,
+                vote_granted: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_basic() {
+        let transport = MockTransport::default();
+        let req = AppendEntriesRequest::default();
+        let res = transport.send_append_entries(1, req).await.unwrap();
+        assert!(!res.success); // Basic check that the default response is returned
+
+        let req = RequestVoteRequest::default();
+        let res = transport.send_request_vote(1, req).await.unwrap();
+        assert!(!res.vote_granted);
     }
 }

@@ -1,7 +1,17 @@
 [package]
 name = "raft-core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 wcygan_raft_community_neoeinstein-prost = { workspace = true }
+# Add async-trait for async methods in traits
+async-trait = "0.1"
+# Add anyhow for error handling in trait methods
+anyhow = { workspace = true }
+# Add tokio for async runtime features in tests (e.g. Mutex)
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+
+[dev-dependencies]
+# Add tokio for async runtime in tests
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }

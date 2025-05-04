@@ -552,6 +552,9 @@ dependencies = [
 name = "raft-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
  "wcygan_raft_community_neoeinstein-prost",
 ]
 
