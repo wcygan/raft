@@ -64,42 +64,6 @@ async fn setup_cluster(
     (nodes, receivers_map, transports_map, registry)
 }
 
-/// Helper to create a RaftNode with InMemoryStorage and MockTransport for integration tests.
-async fn create_raft_node(
-    node_id: NodeId,
-    all_node_ids: &[NodeId], // Changed parameter name for clarity
-    registry: Arc<TransportRegistry>,
-) -> Arc<Mutex<RaftNode<InMemoryStorage, MockTransport>>> {
-    init_tracing(); // Ensure tracing is initialized for each node creation
-
-    let storage = InMemoryStorage::new();
-    let (transport, _receivers) = MockTransport::create_with_options(
-        node_id,
-        NetworkOptions::default(), // Default network options for now
-        registry,                  // Use the shared registry
-    )
-    .await;
-
-    let mut peers = HashMap::new();
-    for &id in all_node_ids { // Use pattern matching to get the value directly
-        if id != node_id { 
-            // Placeholder address, not used by MockTransport
-            peers.insert(id, format!("addr_{}", id));
-        }
-    }
-
-    let config = Config {
-        id: node_id,
-        peers, // Use the created HashMap
-        heartbeat_interval_ms: 150,   // Use correct field name
-        election_timeout_min_ms: 500, // Use correct field name (increased for stability)
-        election_timeout_max_ms: 800, // Use correct field name (increased for stability)
-    };
-
-    let node = RaftNode::new(node_id, config, storage, transport);
-    Arc::new(Mutex::new(node))
-}
-
 /// Helper task to respond to RPCs for a given node.
 /// Spawns a background task.
 fn spawn_raft_responder_task(

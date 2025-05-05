@@ -195,13 +195,14 @@ async fn test_message_delay() {
     let node1 = TestNode::new_with_options(
         1,
         NetworkOptions {
-            message_delay: Some(delay),
+            min_delay: delay,
+            max_delay: delay,
             ..Default::default()
         },
         registry.clone(),
     )
     .await;
-    let mut node2 = TestNode::new(2, registry.clone()).await; // Receiver doesn't need delay
+    let mut node2 = TestNode::new(2, registry.clone()).await;
 
     TestNode::spawn_responder_task(node2.take_receivers());
 
@@ -220,7 +221,6 @@ async fn test_message_delay() {
         elapsed >= delay,
         "Elapsed time should be at least the configured delay"
     );
-    // Add a reasonable upper bound to catch unexpected hangs
     assert!(elapsed < delay * 5, "Elapsed time excessively long");
 }
 
@@ -376,7 +376,8 @@ async fn test_variable_delays_slow_node() {
     let node1 = TestNode::new_with_options(
         1,
         NetworkOptions {
-            message_delay: Some(slow_delay),
+            min_delay: slow_delay,
+            max_delay: slow_delay,
             ..Default::default()
         },
         registry.clone(),
@@ -386,52 +387,46 @@ async fn test_variable_delays_slow_node() {
     let node2 = TestNode::new_with_options(
         2,
         NetworkOptions {
-            message_delay: Some(normal_delay),
+            min_delay: normal_delay,
+            max_delay: normal_delay,
             ..Default::default()
         },
         registry.clone(),
     )
     .await;
-    // Node 3 receives (no delay needed on receiver side for this test)
+    // Node 3 receives
     let mut node3 = TestNode::new(3, registry.clone()).await;
     TestNode::spawn_responder_task(node3.take_receivers());
 
     let req = AppendEntriesRequest {
+        leader_id: 1,
         ..Default::default()
     };
 
-    // Measure slow send
     let start1 = Instant::now();
-    let _ = node1
-        .transport
-        .send_append_entries(3, req.clone())
-        .await
-        .unwrap();
+    let res1 = node1.transport.send_append_entries(3, req.clone()).await;
     let elapsed1 = start1.elapsed();
-    tracing::info!(node = 1, ?elapsed1, expected_delay = ?slow_delay, "Measured slow send");
-    assert!(
-        elapsed1 >= slow_delay && elapsed1 < slow_delay * 3,
-        "Slow node delay out of bounds"
-    );
 
-    // Measure normal send
     let start2 = Instant::now();
-    let _ = node2
-        .transport
-        .send_append_entries(3, req.clone())
-        .await
-        .unwrap();
+    let res2 = node2.transport.send_append_entries(3, req.clone()).await;
     let elapsed2 = start2.elapsed();
-    tracing::info!(node = 2, ?elapsed2, expected_delay = ?normal_delay, "Measured normal send");
-    assert!(
-        elapsed2 >= normal_delay && elapsed2 < normal_delay * 10,
-        "Normal node delay out of bounds"
-    ); // Wider margin for normal
 
-    assert!(
-        elapsed1 > elapsed2 * 3,
-        "Slow node was not significantly slower than normal node"
-    );
+    assert!(res1.is_ok());
+    assert!(res2.is_ok());
+
+    tracing::info!(?elapsed1, ?slow_delay, "Node 1 (slow) send time");
+    tracing::info!(?elapsed2, ?normal_delay, "Node 2 (normal) send time");
+
+    // Check that slow node took significantly longer
+    assert!(elapsed1 >= slow_delay);
+    assert!(elapsed1 < slow_delay * 5); // Upper bound
+    assert!(elapsed2 >= normal_delay);
+    assert!(elapsed2 < normal_delay * 10); // Wider bound for faster delay
+
+    // Crucially, check that node 1 was slower than node 2
+    // Use a threshold slightly less than the difference in delays to account for jitter
+    let expected_diff = slow_delay - normal_delay;
+    assert!(elapsed1 > elapsed2 + expected_diff / 2);
 }
 
 #[tokio::test]

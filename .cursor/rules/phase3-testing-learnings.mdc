@@ -1,0 +1,17 @@
+---
+description: "Key learnings from Phase 3 testing refactor relevant for Phase 4 (Log Replication)."
+globs: ["*.rs"]
+alwaysApply: true
+---
+
+# Learnings from Phase 3 Testing Refactor & Next Steps Context
+
+This summarizes key points from the refactoring of unit tests in [`raft-core/tests/unit_tests.rs`](mdc:raft-core/tests/unit_tests.rs) and debugging, relevant for implementing **Phase 4 (Log Replication)**:
+
+1.  **Test Organization:** Unit tests for `RaftNode` logic are now in [`raft-core/tests/unit_tests.rs`](mdc:raft-core/tests/unit_tests.rs), using real `InMemoryStorage` and `MockTransport`. Integration tests remain in [`raft-core/tests/election_test.rs`](mdc:raft-core/tests/election_test.rs).
+2.  **`InMemoryStorage` Gap Detection:** The [`InMemoryStorage`](mdc:raft-storage/src/lib.rs) implementation *strictly enforces* contiguous log entries (no index gaps). This was the cause of test failures after switching from the older inline mock. The `handle_append_entries` implementation must respect this when appending entries. Tests setting up specific log states must append entries sequentially from index 1.
+3.  **`MockTransport` Async Testing:**
+    *   Ensure responder tasks (like `spawn_raft_responder_task`) are running for receiving nodes in integration tests using [`MockTransport`](mdc:raft-transport/src/mock.rs) to avoid hangs/timeouts. See [`raft-core/tests/election_test.rs`](mdc:raft-core/tests/election_test.rs) for examples.
+    *   Remember to clone shared resources (`Arc<Mutex<RaftNode>>`, `Arc<TransportRegistry>`) correctly when moving them into async tasks/closures.
+4.  **Visibility for Tests:** Some `RaftNode` members (`votes_received`) and methods (`become_follower`, `become_candidate`, `become_leader`, `is_log_up_to_date`) were made `pub` solely to allow the external unit tests in [`raft-core/tests/unit_tests.rs`](mdc:raft-core/tests/unit_tests.rs) to access them.
+5.  **RNG Workaround:** Using `SmallRng::from_rng(&mut rand::thread_rng())` instead of `SmallRng::from_entropy()` for random timeouts in [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs) and [`raft-transport/src/network.rs`](mdc:raft-transport/src/network.rs) due to compiler resolution issues with `from_entropy`. This introduces deprecation warnings but is currently functional for simulation.
