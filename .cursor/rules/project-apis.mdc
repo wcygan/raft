@@ -1,0 +1,144 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Project API Summary
+
+This document summarizes the public APIs for the core crates of the Raft implementation.
+
+## `raft-core` ([`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs))
+
+### Traits
+
+*   `trait Storage`: Defines asynchronous methods for persistent storage.
+    *   `save_hard_state(&mut self, state: &HardState) -> Result<()>`
+    *   `read_hard_state(&self) -> Result<HardState>`
+    *   `append_log_entries(&mut self, entries: &[LogEntry]) -> Result<()>`
+    *   `read_log_entry(&self, index: u64) -> Result<Option<LogEntry>>`
+    *   `read_log_entries(&self, start_index: u64, end_index: u64) -> Result<Vec<LogEntry>>`
+    *   `truncate_log_prefix(&mut self, end_index_exclusive: u64) -> Result<()>`
+    *   `truncate_log_suffix(&mut self, start_index_inclusive: u64) -> Result<()>`
+    *   `last_log_index(&self) -> Result<u64>`
+    *   `last_log_term(&self) -> Result<u64>`
+    *   *(TODO: Snapshot methods)*
+*   `trait Transport`: Defines asynchronous methods for network communication.
+    *   `send_append_entries(&self, peer_id: NodeId, request: AppendEntriesRequest) -> Result<AppendEntriesResponse>`
+    *   `send_request_vote(&self, peer_id: NodeId, request: RequestVoteRequest) -> Result<RequestVoteResponse>`
+    *   *(TODO: InstallSnapshot method)*
+
+### Structs
+
+*   `struct Config`: Configuration for a Raft node.
+    *   `id: NodeId`
+    *   `peers: HashMap<NodeId, String>`
+    *   `election_timeout_min_ms: u64`
+    *   `election_timeout_max_ms: u64`
+    *   `heartbeat_interval_ms: u64`
+*   `struct RaftNode<S: Storage, T: Transport>`: The main Raft node structure.
+    *   `id: NodeId`
+    *   `state: RaftState`
+    *   `config: Config`
+    *   `storage: S`
+    *   `transport: T`
+    *   `votes_received: HashSet<NodeId>`
+    *   `new(id: NodeId, config: Config, storage: S, transport: T) -> Self`
+    *   `become_follower(&mut self, term: u64, leader_id: Option<NodeId>) -> Result<()>`
+    *   `become_candidate(&mut self) -> Result<()>`
+    *   `become_leader(&mut self) -> Result<()>`
+    *   `handle_request_vote(&mut self, request: RequestVoteRequest) -> Result<RequestVoteResponse>`
+    *   `is_log_up_to_date(&self, candidate_last_log_term: u64, candidate_last_log_index: u64) -> Result<bool>`
+    *   `handle_election_timeout(&mut self) -> Result<()>`
+    *   *(TODO: `handle_append_entries`)*
+*   `struct VolatileState`: Volatile state for all servers.
+    *   `last_applied: u64`
+*   `struct LeaderState`: State specific to leaders.
+    *   `next_index: HashMap<NodeId, u64>`
+    *   `match_index: HashMap<NodeId, u64>`
+*   `struct ServerState`: Implementation-specific server state.
+    *   `role: Role`
+    *   `leader_id: Option<NodeId>`
+*   `struct RaftState`: Complete state of a Raft node.
+    *   `hard_state: HardState` (Protobuf type)
+    *   `log: Vec<LogEntry>` (Protobuf type)
+    *   `volatile: VolatileState`
+    *   `leader: LeaderState`
+    *   `server: ServerState`
+    *   `node_id: NodeId`
+    *   `new(node_id: NodeId) -> Self`
+    *   `impl Default`
+
+### Enums
+
+*   `enum Role`: Possible roles (Follower, Candidate, Leader).
+
+### Type Aliases
+
+*   `type NodeId = u64`
+
+### Protobuf Types (Re-exported/Used)
+
+*   `AppendEntriesRequest`, `AppendEntriesResponse`
+*   `RequestVoteRequest`, `RequestVoteResponse`
+*   `LogEntry`
+*   `HardState`
+
+## `raft-transport` ([`raft-transport/src/lib.rs`](mdc:raft-transport/src/lib.rs), [`mock.rs`](mdc:raft-transport/src/mock.rs), [`network.rs`](mdc:raft-transport/src/network.rs))
+
+### Traits
+
+*   Re-exports `raft_core::Transport`
+
+### Structs
+
+*   `struct MockTransport`: Mock implementation of the `Transport` trait using Tokio channels.
+    *   Implements `Transport`
+    *   `async fn create_with_options(node_id: NodeId, options: NetworkOptions, registry: Arc<TransportRegistry>) -> (Self, PeerReceivers)`
+    *   `fn close(&self)` (for explicit cleanup, although `Drop` is implemented)
+    *   `async fn update_network_options(&self, options: NetworkOptions)`
+    *   `async fn partition_from(&self, peer_id: NodeId)`
+    *   `async fn heal_partition_from(&self, peer_id: NodeId)`
+    *   Implements `Drop` for automatic cleanup/unregistration.
+*   `struct PeerReceivers`: Holds receiver ends of channels for a node (used in test setup).
+    *   `append_entries_rx: AppendEntriesReceiver`
+    *   `request_vote_rx: RequestVoteReceiver`
+*   `struct TransportRegistry`: Shared registry for `MockTransport` instances within a test context.
+    *   `fn new() -> Self`
+*   `struct NetworkOptions`: Configuration for simulated network behavior.
+    *   `message_loss_probability: f64`
+    *   `min_delay: Duration`
+    *   `max_delay: Duration`
+    *   `partitioned_links: HashSet<(NodeId, NodeId)>`
+    *   `impl Default`
+    *   `fn should_drop_message(&self) -> bool`
+    *   `fn is_partitioned(&self, sender: NodeId, receiver: NodeId) -> bool`
+    *   `async fn simulate_delay(&self)`
+
+### Enums
+
+*   `enum TransportError`: Custom errors for the transport layer.
+
+### Type Aliases
+
+*   `type AppendEntriesReceiver = mpsc::Receiver<...>`
+*   `type RequestVoteReceiver = mpsc::Receiver<...>`
+
+## `proto` ([`proto/raft/v1/raft.proto`](mdc:proto/raft/v1/raft.proto)) - Defines Messages and Service
+
+### Messages (Protobuf definitions, correspond to generated Rust structs)
+
+*   `message LogEntry { index, term, command }`
+*   `message AppendEntriesRequest { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit }`
+*   `message AppendEntriesResponse { term, success, match_index }`
+*   `message RequestVoteRequest { term, candidate_id, last_log_index, last_log_term }`
+*   `message RequestVoteResponse { term, vote_granted }`
+*   `message InstallSnapshotRequest { term, leader_id, last_included_index, last_included_term, data }`
+*   `message InstallSnapshotResponse { term }`
+*   `message HardState { term, voted_for, commit_index }`
+
+### Service (gRPC definition, corresponds to generated Rust traits/clients)
+
+*   `service RaftService`
+    *   `rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse)`
+    *   `rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse)`
+    *   `rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse)`
