@@ -1,0 +1,32 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Storage Implementation Lessons
+
+1.  **Index Handling (Absolute Indices)**
+    *   Raft log indices (`LogEntry.index`) are *absolute* and monotonic, typically starting from 1.
+    *   Storage operations must work with these absolute indices, not relative positions in underlying data structures (like `Vec` indices).
+    *   **Prefix Truncation:** `truncate_log_prefix(end_index_exclusive)` removes entries with absolute index `< end_index_exclusive`. Indices of remaining entries **do not change**. Implementations must find the correct *position* in the underlying storage corresponding to `end_index_exclusive` to perform the truncation (e.g., using `iter().position()`).
+    *   **Reads/Lookups:** Functions like `read_log_entry`, `read_log_entries`, `last_log_index` must operate based on the absolute `index` field within each `LogEntry`, often requiring iteration (`iter().find()`, `iter().filter()`) rather than direct indexing if prefix truncation has occurred.
+
+2.  **Truncation Logic Details (`truncate_log_prefix`)**
+    *   **Goal:** Remove all log entries with `entry.index < end_index_exclusive`.
+    *   **Implementation:** Find the position (`pos`) of the first entry where `entry.index >= end_index_exclusive`. Drain elements *before* that position (`drain(..pos)`).
+    *   **Edge Case (Keep All):** If `end_index_exclusive <= 1`, no entries should be removed (it's a no-op).
+    *   **Edge Case (Remove All):** If no entry exists with `entry.index >= end_index_exclusive`, all entries should be removed (`clear()`).
+
+3.  **Log Consistency & Contiguity**
+    *   Implementations (like `InMemoryStorage`) should typically enforce contiguous log entries; appending an entry requires its index to be exactly `last_log_index + 1`.
+    *   Gap detection during append operations is crucial for correctness.
+    *   Handle potential conflicts when appending entries: if an entry already exists at the target index, decide whether to overwrite (if terms match/are higher) or reject, according to Raft rules (which will be handled in `handle_append_entries`).
+
+4.  **Stateful Testing:**
+    *   Testing storage requires careful sequencing of operations to cover edge cases revealed by interactions (e.g., append, truncate, read).
+    *   Verify state correctness after each operation in test sequences.
+
+5.  **Dependency Management (Workspaces)**
+    *   Use `path = "../other_crate"` for dependencies *within* the workspace.
+    *   Use `workspace = true` to inherit *external* dependencies from the root `Cargo.toml`.
+    *   Place test-only dependencies in `[dev-dependencies]`.

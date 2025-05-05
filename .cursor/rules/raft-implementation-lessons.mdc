@@ -1,0 +1,30 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Raft Implementation Lessons
+
+1.  **State Management & Transitions**
+    *   **Single Source of Truth:** Use component substructs (`HardState`, `VolatileState`, `ServerState`, `LeaderState`) within `RaftState` as the definitive source for specific state variables (e.g., access `state.hard_state.commit_index`, not a duplicate field).
+    *   **State Transition Helpers:** Implement dedicated internal methods (`become_follower`, `become_candidate`, `become_leader`) to encapsulate the logic for each state transition, ensuring consistency (updating role, term, leader ID, votes, timers, persistence).
+    *   **Persistence Timing:** Persist `HardState` (term, voted_for, commit_index) *before* responding to RPCs or taking actions that depend on the persisted state.
+    *   **Initialization:** Ensure `RaftNode::new` correctly loads persisted state and initializes timers.
+
+2.  **Protocol Details & Edge Cases**
+    *   **Leader Identification:** Followers only learn the current leader's `leader_id` when they receive an RPC (AppendEntries/Heartbeat) from that leader with a valid term. Do not assume followers know the leader immediately after election completion.
+    *   **`voted_for` Convention:** Use `0` (the default for `uint64` in Protobuf) to represent "null" or "no vote cast" for the `HardState.voted_for` field. Implement logic accordingly.
+    *   **Log Up-to-Date Check:** Implement the log comparison logic correctly (§5.4.1): compare terms first, then indices.
+    *   **Single-Node Election:** Explicitly handle the case of a single-node cluster (`config.peers.is_empty()`) in `handle_election_timeout`. Such a node should become leader immediately after becoming a candidate and voting for itself.
+    *   **Term Handling:** Strictly follow Raft rules for term comparison in all RPC handlers. Step down to Follower (`become_follower`) if a higher term is discovered in any RPC request or response.
+
+3.  **Implementation Patterns & Rust Specifics**
+    *   **RPC Handling:** Implement RPC handlers (`handle_request_vote`, `handle_append_entries`) to precisely follow the steps outlined in the Raft paper (§5).
+    *   **Concurrency:** Use `tokio::spawn` for potentially blocking or long-running operations like sending RPCs concurrently (e.g., sending `RequestVote` to all peers). Ensure necessary trait bounds (like `T: Transport + Clone`) are met.
+    *   **Protobuf Types:** Understand the mapping between Protobuf types and Rust types (e.g., `uint64` maps to `u64`, not `Option<u64>`). Leverage `Copy` where available for simple proto messages to avoid unnecessary `.clone()` calls.
+    *   **Trait Signatures:** Ensure method signatures exactly match the definitions in implemented traits (`Storage`, `Transport`).
+
+4.  **Debugging & Verification**
+    *   **Detailed Logging:** Use `tracing` extensively within core logic (state transitions, RPC handlers, timer events) to understand behavior, especially during debugging.
+    *   **Incremental Testing:** Progress from unit tests to integration tests (single-node, multi-node) to isolate issues effectively.
+    *   **Realistic Assertions:** Ensure test assertions match the guarantees of the protocol at the specific point being tested.

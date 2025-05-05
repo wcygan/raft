@@ -1,0 +1,31 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Test Strategies and Best Practices
+
+1.  **Focused Tests**
+    *   Prefer multiple focused tests over large tests covering many scenarios.
+    *   Name tests descriptively for the specific behavior they verify (e.g., `test_append_single_entry`, `test_reject_vote_stale_term`).
+    *   Use helper functions (like `setup_cluster`, `create_raft_node`, `spawn_responder_task`) for common test setup to reduce duplication.
+
+2.  **Test Feedback & Debugging**
+    *   Leverage the `tracing` framework (`trace!`, `debug!`, `info!`) for visibility into test execution flow and state changes. Initialize tracing at the start of test functions.
+    *   Run tests with `-- --nocapture` (e.g., `cargo test your_test_name -- --nocapture`) to see log output during execution.
+    *   Use environment variables like `RUST_LOG=trace` to control log verbosity.
+    *   Add temporary print statements strategically (`eprintln!`, `dbg!`) during debugging sessions to inspect specific values or confirm code paths. Remove them afterwards.
+
+3.  **Async Testing Patterns (`MockTransport`, `tokio`)**
+    *   **Responder Readiness:** Ensure responder tasks (e.g., `spawn_raft_responder_task`) for receiving nodes are running *before* sending requests in tests involving `MockTransport` to avoid deadlocks or timeouts.
+    *   **Resource Cloning:** Clone shared resources (`Arc<Mutex<RaftNode>>`, `Arc<TransportRegistry>`) correctly when moving them into async tasks or closures to avoid ownership issues (E0382).
+    *   **Readiness Signaling:** For complex scenarios, consider explicit readiness signaling between test components instead of relying on `tokio::time::sleep`.
+    *   **Adequate Timeouts:** Use sufficiently long timeouts in integration tests (e.g., `tokio::time::timeout`) to account for potential delays in CI or resource-constrained environments.
+
+4.  **Common Issues and Solutions in Mocking/Testing**
+    *   **Test Isolation:** Avoid static mutable state (like global registries) for managing mock components across tests. It leads to interference and non-deterministic failures.
+    *   **Instance-Specific State:** Use instance-specific shared state via `Arc` (e.g., `Arc<TransportRegistry>`) passed during mock object creation. This ensures isolation between concurrent tests while allowing interaction within a single test's context.
+    *   **Automatic Cleanup:** Implement the `Drop` trait on mock components (like `MockTransport`) to automatically clean up resources (e.g., remove entries from a registry) when they go out of scope, simplifying test teardown.
+    *   **Storage Gaps:** Be aware that `InMemoryStorage` strictly enforces contiguous log entries. Test setups must append entries sequentially. `handle_append_entries` logic must respect this.
+    *   **Visibility:** You might need to make some internal `RaftNode` members or methods `pub` or `pub(crate)` *solely* to allow access from external tests (`tests/` directory). Minimize this where possible.
+    *   **RNG:** Be aware of potential issues with random number generation sources (e.g., `SmallRng::from_entropy()` vs. `SmallRng::from_rng(&mut rand::thread_rng())`) and associated deprecation warnings if workarounds are needed.

@@ -1,0 +1,26 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Transport Layer Implementation Lessons (`MockTransport`)
+
+1.  **Registry Management & Test Isolation**
+    *   **Instance-Specific Registry:** Use a non-static `TransportRegistry` shared via `Arc` (`Arc<TransportRegistry>`) for groups of `MockTransport` instances that need to communicate *within* a single test context.
+    *   **Creation:** Instantiate the registry (`TransportRegistry::new()`) per test (or test group) and pass `registry.clone()` to `MockTransport::create_with_options`.
+    *   **Avoid Globals:** Do *not* use `static` mutable registries (like `Lazy<RwLock<HashMap<...>>>`) as they break test isolation when tests run concurrently (`cargo test`).
+    *   **Automatic Cleanup:** Implement the `Drop` trait on `MockTransport`. In the `drop` method, remove the transport's entry from the associated `TransportRegistry` using its `node_id`. This ensures automatic cleanup when a transport goes out of scope, simplifying test teardown.
+
+2.  **Asynchronous Communication Patterns (Tokio Channels)**
+    *   **Request/Response:** Use MPSC channels for sending requests (`AppendEntriesRequest`, `RequestVoteRequest`) and `oneshot` channels for their corresponding responses.
+The sender includes a `oneshot::Sender` in the request message payload.
+    *   **Responder Tasks:** The receiving node must have an active task (e.g., spawned via `tokio::spawn`) that continuously receives requests from its MPSC channel (`append_entries_rx`, `request_vote_rx`). This task processes the request and sends the response back via the `oneshot::Sender` provided in the request.
+    *   **Deadlock Prevention:** Failure to have a running responder task for a node that receives a request will cause the *sender* to block indefinitely waiting on the `oneshot` channel, leading to test hangs or timeouts.
+    *   **Channel Closure:** Handle potential `SendError`s gracefully, as they might indicate that the receiving end (responder task or transport) has been dropped or closed.
+
+3.  **Simulating Network Conditions (`NetworkOptions`)**
+    *   Provide configuration options (`NetworkOptions`) to simulate:
+        *   **Message Loss:** Randomly drop messages based on a probability (`message_loss_probability`).
+        *   **Delay:** Introduce random delays (`min_delay`, `max_delay`) before delivering messages using `tokio::time::sleep`.
+        *   **Partitions:** Maintain a set of partitioned links (`partitioned_links: HashSet<(NodeId, NodeId)>`). Check this set before delivering a message. Provide methods (`partition_from`, `heal_partition_from`, `update_network_options`) to dynamically control partitions during tests.
+    *   Test both symmetric (A<->B) and asymmetric (A->B but not B->A) partitions.
