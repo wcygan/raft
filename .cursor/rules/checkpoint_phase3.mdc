@@ -1,0 +1,48 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Checkpoint: Phase 3 Summary and Next Steps
+
+**Completed (Phase 3 - Leader Election)**
+
+*   **State Machine & Transitions (`raft-core` crate):** Implemented the core Raft state transitions (Follower ↔ Candidate ↔ Leader) within [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs).
+*   **Election Timer:** Implemented election timer logic with randomized timeouts and correct reset behavior on state changes or relevant RPCs.
+*   **RPC Handling:**
+    *   Implemented `handle_request_vote` in [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs) according to Raft rules (§5.1, §5.2, §5.4), including term checks, log up-to-date checks, and persistence of `HardState` (term, voted_for).
+    *   Implemented `handle_election_timeout` to initiate candidacy, send `RequestVote` RPCs concurrently, tally votes, and transition to Leader upon achieving majority.
+*   **Edge Case Handling:** Added specific logic to correctly handle leader election in single-node clusters.
+*   **Unit Tests:** Developed and passed unit tests in [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs) covering:
+    *   State transitions (`become_follower`, `become_candidate`, `become_leader`).
+    *   `handle_request_vote` scenarios (grant, reject term, reject log, reject voted, step down).
+    *   `is_log_up_to_date` logic.
+    *   Election timer reset behavior.
+*   **Integration Tests:** Developed and passed integration tests in [`raft-core/tests/election_test.rs`](mdc:raft-core/tests/election_test.rs) using `MockTransport` to verify:
+    *   Correct initial state.
+    *   Successful leader election in a single-node cluster.
+    *   Successful and stable leader election in a 3-node cluster.
+    *   Resolved issues related to asynchronous task readiness and test setup using `setup_cluster` and `spawn_raft_responder_task` helpers.
+*   **Quality Standards:** Verified that `cargo check --workspace`, `cargo fmt --all`, and `cargo test --workspace` all pass successfully, meeting the requirements outlined in [checkpoint-quality](mdc:.cursor/rules/checkpoint-quality.mdc).
+
+Refer to [docs/PLAN.md](mdc:docs/PLAN.md) for details.
+
+---
+
+**Next focus (Phase 4 - Log Replication & Commit)**
+
+1.  **AppendEntries RPC Logic (`raft-core` crate):**
+    *   Implement the leader logic to send `AppendEntries` RPCs (initially as heartbeats, later with log entries).
+    *   Implement the follower logic in `handle_append_entries` to respond to these RPCs, including term checks, log consistency checks, and appending entries.
+2.  **Commit Index Advancement:**
+    *   Implement leader logic to update its `commit_index` based on `match_index` across a majority of followers.
+    *   Implement follower logic to update its `commit_index` based on the `leader_commit` field in `AppendEntries` requests.
+3.  **State Machine Application:** Apply committed log entries to the state machine (though the machine itself might still be trivial).
+4.  **Unit Tests:** Write unit tests for the log matching property and commit rule implementations.
+5.  **Integration Tests:** Develop integration tests using `MockTransport` to verify that:
+    *   A leader sends periodic heartbeats.
+    *   A leader replicates log entries to followers.
+    *   The commit index advances correctly on the leader and followers.
+6.  **Deterministic Cluster Tests:** Enhance or use a deterministic test harness to simulate follower lag, leader crashes during replication, and recovery scenarios involving log reconciliation.
+
+Use this checkpoint to guide the implementation of the log replication and commit logic within the `raft-core` crate.

@@ -1,12 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{sleep, Duration};
+use tokio::sync::oneshot;
+use tokio::time::Duration;
 
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, HardState, LogEntry, RequestVoteRequest,
@@ -233,7 +232,10 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
     /// Calculates the initial election timeout duration.
     /// Called once during initialization.
     fn initialize_election_timeout(&mut self) {
-        self.election_timeout_duration_ms = self.calculate_random_timeout();
+        // Calculate the first timeout AND initialize the reset channel/sender
+        let (_initial_rx, initial_duration) = self.reset_election_timer();
+        self.election_timeout_duration_ms = initial_duration; // Store the duration
+
         tracing::debug!(
             node_id = self.config.id,
             timeout_ms = self.election_timeout_duration_ms,
@@ -568,13 +570,145 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
         Ok(self.state.log.last().map_or(0, |e| e.term))
     }
 
-    // ... existing code ...
+    // TODO: This should ideally not be public, but is needed for direct testing
+    //       of the timeout logic until the main run loop manages timers.
+    /// Handles the election timeout event, triggering a potential candidacy.
+    pub async fn handle_election_timeout(&mut self) -> Result<()> {
+        // Ignore timeout if already leader
+        if self.state.server.role == Role::Leader {
+            tracing::trace!(
+                node_id = self.config.id,
+                "Ignoring election timeout as leader."
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            node_id = self.config.id,
+            term = self.state.hard_state.term,
+            "Election timeout triggered."
+        );
+
+        // Transition to candidate
+        self.become_candidate().await?;
+
+        // Send RequestVote RPCs to all peers concurrently
+        let current_term = self.state.hard_state.term;
+        let last_log_idx = self.storage.last_log_index().await?;
+        let last_log_term = self.storage.last_log_term().await?;
+
+        let request = RequestVoteRequest {
+            term: current_term,
+            candidate_id: self.config.id,
+            last_log_index: last_log_idx,
+            last_log_term,
+        };
+
+        let mut vote_responses = Vec::new();
+        let peer_ids: Vec<NodeId> = self.config.peers.keys().copied().collect(); // Collect keys
+
+        // Spawn tasks for each peer
+        for peer_id in peer_ids {
+            if peer_id == self.config.id {
+                continue;
+            } // Don't send to self
+            let transport_clone = self.transport.clone(); // Clone transport for the task
+            let request_clone = request.clone(); // Clone request for the task
+            let node_id = self.config.id; // Capture node_id
+
+            let task = tokio::spawn(async move {
+                tracing::debug!(target: "election", node_id, peer_id, ?request_clone, "Sending RequestVote RPC");
+                transport_clone
+                    .send_request_vote(peer_id, request_clone)
+                    .await
+            });
+            vote_responses.push(task);
+        }
+
+        // Tally votes
+        let mut votes_granted_count = self.votes_received.len(); // Start with self-vote
+        let required_votes = (self.config.peers.len() / 2) + 1;
+
+        // --- Optimization/Edge Case: Single Node Cluster ---
+        // If we are the only node, the self-vote is sufficient for majority.
+        if self.state.server.role == Role::Candidate
+            && self.state.hard_state.term == current_term
+            && votes_granted_count >= required_votes
+            && self.config.peers.is_empty()
+        {
+            // Check if it's a single-node cluster
+            tracing::info!(target: "election", node_id = self.config.id, term = current_term, votes = votes_granted_count, "Single node cluster: becoming leader immediately after candidacy.");
+            self.become_leader().await?;
+            // Return early as no need to process non-existent peer responses
+            return Ok(());
+        }
+        // --- End Single Node Cluster Check ---
+
+        for handle in vote_responses {
+            // If we are no longer a candidate (e.g., stepped down due to higher term in response),
+            // stop processing votes for this election.
+            if self.state.server.role != Role::Candidate
+                || self.state.hard_state.term != current_term
+            {
+                tracing::info!(node_id = self.config.id, old_term = current_term, new_term = self.state.hard_state.term, old_role = ?Role::Candidate, new_role = ?self.state.server.role, "Aborting vote count due to state change.");
+                break; // Exit the loop
+            }
+
+            match handle.await {
+                Ok(Ok(response)) => {
+                    tracing::debug!(target: "election", node_id = self.config.id, ?response, "Received RequestVote response");
+                    // Step down if response term is higher
+                    if response.term > self.state.hard_state.term {
+                        tracing::info!(
+                            node_id = self.config.id,
+                            old_term = self.state.hard_state.term,
+                            new_term = response.term,
+                            "Stepping down due to higher term in RequestVote response"
+                        );
+                        self.become_follower(response.term, None).await?;
+                        // Important: Break here because state changed, vote is irrelevant now
+                        break;
+                    } else if response.vote_granted {
+                        votes_granted_count += 1;
+                        // Record the voter - though not strictly necessary for just counting
+                        // self.votes_received.insert(peer_id_from_response); // Need peer id from response/context
+                        tracing::debug!(target: "election", node_id = self.config.id, term = current_term, votes_granted_count, required_votes, "Vote granted");
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(target: "election", node_id = self.config.id, error = ?e, "Error receiving RequestVote response");
+                }
+                Err(e) => {
+                    // Task panicked or was cancelled
+                    tracing::warn!(target: "election", node_id = self.config.id, error = ?e, "RequestVote task failed");
+                }
+            }
+
+            // Check if majority achieved after processing each vote
+            if self.state.server.role == Role::Candidate
+                && self.state.hard_state.term == current_term
+                && votes_granted_count >= required_votes
+            {
+                tracing::info!(target: "election", node_id = self.config.id, term = current_term, votes = votes_granted_count, "Majority achieved, becoming leader");
+                self.become_leader().await?;
+                break; // Stop processing votes once leader
+            }
+        }
+
+        // If loop finished without becoming leader, we remain candidate (and will eventually time out again)
+        if self.state.server.role == Role::Candidate {
+            tracing::debug!(target: "election", node_id = self.config.id, term = current_term, votes = votes_granted_count, "Election finished without becoming leader");
+            // The election timer would have been reset in become_candidate
+            // The main loop would start a new timeout based on that reset
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // use crate::raft::v1::*;
     use bytes::Bytes;
     use std::collections::HashMap;
     use tokio::time::Duration;

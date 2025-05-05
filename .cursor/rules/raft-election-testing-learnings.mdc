@@ -1,0 +1,39 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Raft Leader Election Implementation & Testing Learnings (Phase 3 Debugging)
+
+This document captures important lessons learned during the implementation and debugging of the Raft leader election phase, particularly from resolving issues in [`raft-core/tests/election_test.rs`](mdc:raft-core/tests/election_test.rs).
+
+## Testing Asynchronous Interactions
+
+1.  **Responder Task Readiness:** Tests involving simulated RPCs (like `RequestVote` using [`MockTransport`](mdc:raft-transport/src/mock.rs)) require the responder task (e.g., `spawn_raft_responder_task`) for the receiving node to be running *before* the RPC is sent.
+    *   **Problem:** Initial tests failed with timeouts (`test_three_node_election`) or `SendError` because the responder task wasn't ready when the initiating node sent the `RequestVote`.
+    *   **Solution:** Ensure responder tasks are spawned early in the test setup. While adding small `tokio::time::sleep` delays after spawning can work as a temporary fix, more robust solutions might involve explicit readiness signaling between the test harness and responder tasks.
+    *   **Related:** Warnings like `unused implementer of Future that must be used` often indicate that a spawned task or future isn't being managed or awaited correctly.
+
+2.  **Debugging Async Flow:** Use detailed, contextual logging (`tracing`) within both the core logic (e.g., `handle_request_vote`, state transition methods in [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs)) and test helpers (`spawn_raft_responder_task`, polling loops) to understand the sequence of events, especially when debugging timeouts or unexpected states.
+
+## Raft Logic & Edge Cases
+
+1.  **Single-Node Cluster Election:** A cluster with only one node requires specific handling during leader election.
+    *   **Problem:** The `test_single_node_becomes_leader` failed because the node remained `Candidate`. The general election logic waited for peer responses (which never came).
+    *   **Implementation Detail:** The `Config.peers` map stores *other* nodes. For a single node, this map is empty.
+    *   **Solution:** In `handle_election_timeout` within [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs), explicitly check if `config.peers.is_empty()` *after* becoming a candidate and collecting the self-vote. If true, the node has the majority (itself) and should transition directly to `Leader` without waiting for non-existent RPC responses.
+
+2.  **State Initialization:** Ensure all necessary state components are correctly initialized.
+    *   **Problem:** The `test_election_timer_reset` unit test failed because the initial call to `initialize_election_timeout` didn't create the `oneshot::Sender` needed for subsequent resets.
+    *   **Solution:** Modify `initialize_election_timeout` to call `reset_election_timer` internally, ensuring the timer channel is set up from the start.
+
+## Test Setup & Code Correctness
+
+1.  **Slice Iteration vs. References:** Be precise when iterating over slices (`&[T]`) in Rust.
+    *   **Problem:** Compilation errors (E0614: type `u64` cannot be dereferenced) occurred in `setup_cluster` within [`raft-core/tests/election_test.rs`](mdc:raft-core/tests/election_test.rs).
+    *   **Cause:** Incorrectly attempting to dereference `id` (`*id`) when using `for id in peer_ids.clone()`, where `id` was already a `u64` value.
+    *   **Solution:** Use pattern matching `for &id in &peer_ids { ... }` to directly get the `u64` value when iterating over a slice reference, avoiding the need for later dereferencing.
+
+2.  **Test Helper Functions:** Ensure helper functions like `setup_cluster` and `create_raft_node` correctly initialize all required components (config, storage, transport, peers map).
+
+Applying these learnings helps build more robust, understandable, and verifiable Raft components, especially when dealing with the complexities of asynchronous operations and distributed system edge cases.
