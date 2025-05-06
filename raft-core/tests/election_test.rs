@@ -1,4 +1,4 @@
-use raft_core::{Config, NodeId, RaftNode, Role};
+use raft_core::{Config, NodeId, RaftNode, Role, NoopStateMachine, CommandPayload};
 use raft_storage::InMemoryStorage;
 use raft_transport::{MockTransport, NetworkOptions, PeerReceivers, TransportRegistry};
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ fn init_tracing() {
 async fn setup_cluster(
     node_ids: Vec<NodeId>,
 ) -> (
-    HashMap<NodeId, Arc<Mutex<RaftNode<InMemoryStorage, MockTransport>>>>,
+    HashMap<NodeId, Arc<Mutex<RaftNode<InMemoryStorage, MockTransport, NoopStateMachine>>>>,
     HashMap<NodeId, PeerReceivers>,
     HashMap<NodeId, MockTransport>,
     Arc<TransportRegistry>,
@@ -55,7 +55,8 @@ async fn setup_cluster(
             registry.clone(),
         )
         .await;
-        let node = RaftNode::new(node_id, config, storage, transport.clone());
+        let state_machine = NoopStateMachine;
+        let node = RaftNode::new(node_id, config, storage, transport.clone(), state_machine);
         nodes.insert(node_id, Arc::new(Mutex::new(node)));
         receivers_map.insert(node_id, receivers);
         transports_map.insert(node_id, transport);
@@ -67,7 +68,7 @@ async fn setup_cluster(
 /// Helper task to respond to RPCs for a given node.
 /// Spawns a background task.
 fn spawn_raft_responder_task(
-    node_ref: Arc<Mutex<RaftNode<InMemoryStorage, MockTransport>>>,
+    node_ref: Arc<Mutex<RaftNode<InMemoryStorage, MockTransport, NoopStateMachine>>>,
     mut receivers: raft_transport::mock::PeerReceivers, // Use qualified path
 ) {
     // Clone Arc for the spawned task

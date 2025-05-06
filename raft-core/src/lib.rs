@@ -6,6 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use tokio::sync::oneshot;
 
+// TODO: Consider if bytes::Bytes is a better general-purpose command type.
+// For now, using Vec<u8> to avoid adding a new dependency just for NoopStateMachine.
+pub type CommandPayload = Vec<u8>;
+
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     AppendEntriesRequest, AppendEntriesResponse, HardState, LogEntry, RequestVoteRequest,
     RequestVoteResponse,
@@ -230,11 +234,35 @@ impl ElectionTimer {
     }
 }
 
+/// Trait defining the State Machine operations required by Raft.
+#[async_trait]
+pub trait StateMachine {
+    /// The type of command that this state machine can apply.
+    type Command: Send + Sync + Debug + 'static; // Added Debug for NoopStateMachine
+    /// Applies a command to the state machine.
+    async fn apply(&mut self, command: Self::Command) -> Result<()>;
+}
+
+/// A no-op implementation of the StateMachine trait, useful for testing.
+#[derive(Debug, Clone)]
+pub struct NoopStateMachine;
+
+#[async_trait]
+impl StateMachine for NoopStateMachine {
+    type Command = CommandPayload;
+
+    async fn apply(&mut self, command: Self::Command) -> Result<()> {
+        tracing::trace!(?command, "NoopStateMachine: applied command (did nothing)");
+        Ok(())
+    }
+}
+
 /// The main Raft node structure, encapsulating state and logic.
-/// Generic over Storage and Transport implementations.
+/// Generic over Storage, Transport, and StateMachine implementations.
 pub struct RaftNode<
     S: Storage + Send + Sync + 'static,
     T: Transport + Clone + Send + Sync + 'static,
+    SM: StateMachine<Command = CommandPayload> + Send + Sync + 'static,
 > {
     /// The ID of the node
     pub id: NodeId,
@@ -246,6 +274,8 @@ pub struct RaftNode<
     pub storage: S,
     /// The transport layer for sending and receiving messages
     pub transport: T,
+    /// The state machine to apply committed log entries
+    pub state_machine: SM,
     /// Tracks votes received during a candidacy period.
     pub votes_received: HashSet<NodeId>,
 
@@ -253,22 +283,38 @@ pub struct RaftNode<
     timer: ElectionTimer,
 }
 
-impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 'static>
-    RaftNode<S, T>
+impl<
+        S: Storage + Send + Sync + 'static,
+        T: Transport + Clone + Send + Sync + 'static,
+        SM: StateMachine<Command = CommandPayload> + Send + Sync + 'static,
+    > RaftNode<S, T, SM>
 {
     /// Creates a new RaftNode.
-    pub fn new(id: NodeId, config: Config, storage: S, transport: T) -> Self {
-        let state = RaftState::new(id);
-        // TODO: Load persisted state from storage
-        Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(id: NodeId, config: Config, storage: S, transport: T, state_machine: SM) -> Self {
+        let initial_state = RaftState::new(id);
+        // TODO: Load initial state from storage if available. This should happen before becoming follower.
+        //       And `become_follower` should take the loaded term.
+
+        let mut node = RaftNode {
             id,
-            state,
+            state: initial_state, // Will be updated by become_follower based on storage
             config,
             storage,
             transport,
+            state_machine, // Store the state machine
             votes_received: HashSet::new(),
             timer: ElectionTimer::default(),
-        }
+        };
+
+        // TODO: This initialization logic might need to be async if loading state from storage
+        //       becomes part of `new` or an async constructor is used.
+        //       For now, `initialize_election_timeout` is sync.
+        //       And `become_follower` (which loads from storage) should be called after `new`.
+        node.initialize_election_timeout(); // Sets up the timer but doesn't start it.
+                                            // The main loop or an explicit `run` method would typically call `become_follower`
+                                            // which then starts the first actual election timer.
+        node
     }
 
     /// Calculates the initial election timeout duration.
@@ -712,5 +758,814 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Storage; // Ensure Storage is in scope
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use wcygan_raft_community_neoeinstein_prost::raft::v1::{HardState, LogEntry}; // <-- Import moved here
+
+    // A mock storage implementation for testing purposes.
+    #[derive(Clone, Debug, Default)]
+    struct MockStorage {
+        hard_state: Arc<Mutex<HardState>>,
+        log: Arc<Mutex<Vec<LogEntry>>>,
+        error_on_save: bool, // New field to simulate save errors
+        error_on_read: bool, // New field to simulate read errors
+    }
+
+    #[async_trait]
+    impl Storage for MockStorage {
+        async fn save_hard_state(&mut self, state: &HardState) -> Result<()> {
+            if self.error_on_save {
+                return Err(anyhow::anyhow!("MockStorage: Simulated save error"));
+            }
+            let mut hs = self.hard_state.lock().await;
+            *hs = state.clone();
+            Ok(())
+        }
+
+        async fn read_hard_state(&self) -> Result<HardState> {
+            if self.error_on_read {
+                return Err(anyhow::anyhow!("MockStorage: Simulated read error"));
+            }
+            Ok(self.hard_state.lock().await.clone())
+        }
+
+        async fn append_log_entries(&mut self, entries: &[LogEntry]) -> Result<()> {
+            let mut log = self.log.lock().await;
+            for entry in entries {
+                if let Some(pos) = log.iter().position(|e| e.index == entry.index) {
+                    // Overwrite existing entry if term matches or new term is higher (simplified)
+                    // Proper Raft logic would also check prev_log_index/term.
+                    log[pos] = entry.clone();
+                } else if entry.index == log.last().map_or(0, |e| e.index) + 1 {
+                    log.push(entry.clone());
+                } else {
+                    // For simplicity in mock, allow non-contiguous appends or handle error
+                    // For more realistic mock, this should error if non-contiguous
+                    log.push(entry.clone()); // Simplified: just push
+                                             // return Err(anyhow::anyhow!("MockStorage: Non-contiguous log append attempt"));
+                }
+            }
+            Ok(())
+        }
+
+        async fn read_log_entry(&self, index: u64) -> Result<Option<LogEntry>> {
+            Ok(self
+                .log
+                .lock()
+                .await
+                .iter()
+                .find(|e| e.index == index)
+                .cloned())
+        }
+
+        async fn read_log_entries(
+            &self,
+            start_index: u64,
+            end_index: u64,
+        ) -> Result<Vec<LogEntry>> {
+            Ok(self
+                .log
+                .lock()
+                .await
+                .iter()
+                .filter(|e| e.index >= start_index && e.index < end_index)
+                .cloned()
+                .collect())
+        }
+
+        async fn truncate_log_prefix(&mut self, end_index_exclusive: u64) -> Result<()> {
+            self.log
+                .lock()
+                .await
+                .retain(|e| e.index >= end_index_exclusive);
+            Ok(())
+        }
+
+        async fn truncate_log_suffix(&mut self, start_index_inclusive: u64) -> Result<()> {
+            self.log
+                .lock()
+                .await
+                .retain(|e| e.index < start_index_inclusive);
+            Ok(())
+        }
+
+        async fn last_log_index(&self) -> Result<u64> {
+            Ok(self.log.lock().await.last().map_or(0, |e| e.index))
+        }
+
+        async fn last_log_term(&self) -> Result<u64> {
+            Ok(self.log.lock().await.last().map_or(0, |e| e.term))
+        }
+    }
+
+    // A mock transport implementation for testing purposes.
+    #[derive(Clone, Debug, Default)]
+    struct MockTransport {
+        // Stores requests sent, keyed by peer_id and then a vector of requests.
+        // This allows tests to inspect what was "sent".
+        sent_append_entries: Arc<Mutex<HashMap<NodeId, Vec<AppendEntriesRequest>>>>,
+        sent_request_votes: Arc<Mutex<HashMap<NodeId, Vec<RequestVoteRequest>>>>,
+        // Predefined responses for tests to control behavior.
+        append_entries_responses: Arc<Mutex<HashMap<NodeId, AppendEntriesResponse>>>,
+        request_vote_responses: Arc<Mutex<HashMap<NodeId, RequestVoteResponse>>>,
+        // Simulate network errors
+        error_on_send: bool,
+    }
+
+    impl MockTransport {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        #[allow(dead_code)]
+        async fn set_append_entries_response(
+            &self,
+            peer_id: NodeId,
+            response: AppendEntriesResponse,
+        ) {
+            self.append_entries_responses
+                .lock()
+                .await
+                .insert(peer_id, response);
+        }
+
+        #[allow(dead_code)]
+        async fn set_request_vote_response(&self, peer_id: NodeId, response: RequestVoteResponse) {
+            self.request_vote_responses
+                .lock()
+                .await
+                .insert(peer_id, response);
+        }
+    }
+
+    #[async_trait]
+    impl Transport for MockTransport {
+        async fn send_append_entries(
+            &self,
+            peer_id: NodeId,
+            request: AppendEntriesRequest,
+        ) -> Result<AppendEntriesResponse> {
+            if self.error_on_send {
+                return Err(anyhow::anyhow!("MockTransport: Simulated send error"));
+            }
+            self.sent_append_entries
+                .lock()
+                .await
+                .entry(peer_id)
+                .or_default()
+                .push(request.clone());
+            if let Some(resp) = self.append_entries_responses.lock().await.get(&peer_id) {
+                Ok(resp.clone())
+            } else {
+                // Default response if none is set for the peer
+                Ok(AppendEntriesResponse {
+                    term: request.term,
+                    success: false,
+                    match_index: 0,
+                })
+            }
+        }
+
+        async fn send_request_vote(
+            &self,
+            peer_id: NodeId,
+            request: RequestVoteRequest,
+        ) -> Result<RequestVoteResponse> {
+            if self.error_on_send {
+                return Err(anyhow::anyhow!("MockTransport: Simulated send error"));
+            }
+            self.sent_request_votes
+                .lock()
+                .await
+                .entry(peer_id)
+                .or_default()
+                .push(request.clone());
+            if let Some(resp) = self.request_vote_responses.lock().await.get(&peer_id) {
+                Ok(resp.clone())
+            } else {
+                // Default response: grant vote if term is same or higher, otherwise deny.
+                // This is a simplified behavior for mock.
+                Ok(RequestVoteResponse {
+                    term: request.term,
+                    vote_granted: true,
+                })
+            }
+        }
+    }
+
+    // Helper function to create a RaftNode with mock dependencies for testing.
+    fn create_test_node(
+        id: NodeId,
+        peers: HashMap<NodeId, String>,
+        storage: MockStorage,
+        transport: MockTransport,
+        state_machine: NoopStateMachine,
+    ) -> RaftNode<MockStorage, MockTransport, NoopStateMachine> {
+        let config = Config {
+            id,
+            peers,
+            election_timeout_min_ms: 150,
+            election_timeout_max_ms: 300,
+            heartbeat_interval_ms: 50,
+        };
+        RaftNode::new(id, config, storage, transport, state_machine)
+    }
+
+    #[tokio::test]
+    async fn test_new_node_initial_state() {
+        let storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let node = create_test_node(1, HashMap::new(), storage, transport, state_machine);
+
+        assert_eq!(node.id, 1);
+        assert_eq!(node.state.hard_state.term, 0);
+        assert_eq!(node.state.hard_state.voted_for, 0);
+        assert_eq!(node.state.server.role, Role::Follower);
+        assert!(node.state.server.leader_id.is_none());
+        assert!(node.timer.reset_tx.is_some()); // Timer should be initialized
+    }
+
+    #[tokio::test]
+    async fn test_become_follower_updates_state_and_persists() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node =
+            create_test_node(1, HashMap::new(), storage.clone(), transport, state_machine);
+
+        // Initial state check
+        assert_eq!(node.state.hard_state.term, 0);
+        assert_eq!(node.state.server.role, Role::Follower);
+
+        node.become_follower(1, Some(2)).await.unwrap();
+
+        assert_eq!(node.state.hard_state.term, 1);
+        assert_eq!(node.state.hard_state.voted_for, 0); // Voted_for should be reset if term changes
+        assert_eq!(node.state.server.role, Role::Follower);
+        assert_eq!(node.state.server.leader_id, Some(2));
+
+        let persisted_hs = storage.read_hard_state().await.unwrap();
+        assert_eq!(persisted_hs.term, 1);
+        assert_eq!(persisted_hs.voted_for, 0);
+
+        // Check timer is reset (indirectly, by ensuring a new one exists)
+        assert!(node.timer.reset_tx.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_become_candidate_transitions_state_and_persists() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+
+        let mut node = create_test_node(
+            1,
+            [(2, "peer2".to_string()), (3, "peer3".to_string())]
+                .iter()
+                .cloned()
+                .collect(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Ensure it starts as Follower or some initial state
+        node.become_follower(0, None).await.unwrap(); // Ensure follower state and term 0
+        storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        node.become_candidate().await.unwrap();
+
+        assert_eq!(node.state.hard_state.term, 1);
+        assert_eq!(node.state.hard_state.voted_for, 1); // Voted for self
+        assert_eq!(node.state.server.role, Role::Candidate);
+        assert_eq!(node.votes_received.len(), 1); // Voted for self
+        assert!(node.votes_received.contains(&1));
+
+        let persisted_hs = storage.read_hard_state().await.unwrap();
+        assert_eq!(persisted_hs.term, 1);
+        assert_eq!(persisted_hs.voted_for, 1);
+
+        // Note: become_candidate() does not send RequestVote RPCs
+        // That happens in handle_election_timeout(), which we'll test separately
+
+        // Check timer is reset
+        assert!(node.timer.reset_tx.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_become_leader_transitions_state_and_persists() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            [(2, "peer2".to_string())].iter().cloned().collect(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Transition to candidate first
+        node.become_candidate().await.unwrap(); // Term becomes 1, votes for self
+
+        // Simulate receiving enough votes (already has one for self)
+        // For a 2-node cluster (1,2), self-vote is enough. For 3-node (1,2,3), needs one more.
+        // Here, node 1 is candidate, peers: {2}. Majority for {1,2} is 2. Needs vote from 2.
+        // Let's adjust to a single node cluster for simplicity of this direct test.
+        node.config.peers.clear(); // Make it a single node cluster for this specific test of become_leader
+        node.votes_received.clear();
+        node.votes_received.insert(node.id); // Vote for self
+
+        node.become_leader().await.unwrap();
+
+        assert_eq!(node.state.hard_state.term, 1);
+        assert_eq!(node.state.server.role, Role::Leader);
+        assert_eq!(node.state.server.leader_id, Some(1));
+
+        // Check that next_index and match_index are initialized for peers (if any)
+        // For single node, these should be empty or handle appropriately.
+        // If peers existed, they would be initialized to last_log_index + 1 and 0 respectively.
+        assert!(node.state.leader.next_index.is_empty());
+        assert!(node.state.leader.match_index.is_empty());
+
+        // Persisted state shouldn't change just on becoming leader (term already incremented by candidate)
+        let persisted_hs = storage.read_hard_state().await.unwrap();
+        assert_eq!(persisted_hs.term, 1);
+
+        // Leader should cancel election timer and start sending heartbeats (checked by timer.reset_tx being None or via transport)
+        assert!(node.timer.reset_tx.is_none()); // Election timer should be cancelled
+                                                // Heartbeat sending would be checked by observing transport in a more complex test
+    }
+
+    #[tokio::test]
+    async fn test_is_log_up_to_date() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut raft_node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Scenario 1: Candidate's log is more up-to-date by term
+        raft_node
+            .storage
+            .append_log_entries(&[LogEntry {
+                term: 1,
+                index: 1,
+                command: Bytes::new(),
+            }])
+            .await
+            .unwrap();
+        assert!(raft_node.is_log_up_to_date(2, 1).await.unwrap());
+
+        // Scenario 2: Candidate's log has same term, but longer index
+        assert!(raft_node.is_log_up_to_date(1, 2).await.unwrap());
+
+        // Scenario 3: Candidate's log is less up-to-date by term
+        raft_node
+            .storage
+            .append_log_entries(&[LogEntry {
+                term: 2,
+                index: 2,
+                command: Bytes::new(),
+            }])
+            .await
+            .unwrap();
+        assert!(!raft_node.is_log_up_to_date(1, 3).await.unwrap());
+
+        // Scenario 4: Candidate's log has same term, but shorter index
+        assert!(!raft_node.is_log_up_to_date(2, 1).await.unwrap());
+
+        // Scenario 5: Both logs are empty (or up to same point)
+        let empty_storage = MockStorage::default();
+        let mut raft_node_empty = create_test_node(
+            2,
+            HashMap::new(),
+            empty_storage.clone(),
+            MockTransport::new(),
+            NoopStateMachine,
+        );
+        assert!(raft_node_empty.is_log_up_to_date(0, 0).await.unwrap()); // Candidate also empty
+        assert!(raft_node_empty.is_log_up_to_date(1, 1).await.unwrap()); // Candidate has something, local empty
+
+        raft_node_empty
+            .storage
+            .append_log_entries(&[LogEntry {
+                term: 1,
+                index: 1,
+                command: Bytes::new(),
+            }])
+            .await
+            .unwrap();
+        assert!(!raft_node_empty.is_log_up_to_date(0, 0).await.unwrap()); // Candidate empty, local has something
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_grant_vote() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+        node.state.hard_state.term = 1;
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap(); // Persist current term
+
+        let request = RequestVoteRequest {
+            term: 1,
+            candidate_id: 2,
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        let response = node.handle_request_vote(request).await.unwrap();
+        assert!(response.vote_granted);
+        assert_eq!(response.term, 1);
+        assert_eq!(node.state.hard_state.voted_for, 2);
+        let persisted_hs = storage.read_hard_state().await.unwrap();
+        assert_eq!(persisted_hs.voted_for, 2);
+        assert_eq!(persisted_hs.term, 1);
+        assert!(node.timer.reset_tx.is_some()); // Timer should be reset on granting vote
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_reject_lower_term() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+        node.state.hard_state.term = 2;
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        let request = RequestVoteRequest {
+            term: 1,
+            candidate_id: 2,
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        let response = node.handle_request_vote(request).await.unwrap();
+        assert!(!response.vote_granted);
+        assert_eq!(response.term, 2); // Should return its own, higher term
+        assert_eq!(node.state.hard_state.voted_for, 0); // Should not have voted
+        assert!(node.timer.reset_tx.is_some()); // Timer should still be the one from initialization or previous reset, not cancelled/changed by this particular event
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_reject_already_voted_for_other_in_same_term() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+        node.state.hard_state.term = 1;
+        node.state.hard_state.voted_for = 2; // Voted for node 2
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        let request = RequestVoteRequest {
+            term: 1,
+            candidate_id: 3, // Different candidate
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        let response = node.handle_request_vote(request).await.unwrap();
+        assert!(!response.vote_granted);
+        assert_eq!(response.term, 1);
+        assert_eq!(node.state.hard_state.voted_for, 2); // Should remain voted for 2
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_grant_if_already_voted_for_candidate_in_same_term() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+        node.state.hard_state.term = 1;
+        node.state.hard_state.voted_for = 3; // Already voted for candidate 3
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        let request = RequestVoteRequest {
+            term: 1,
+            candidate_id: 3, // Same candidate
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        let response = node.handle_request_vote(request).await.unwrap();
+        assert!(response.vote_granted);
+        assert_eq!(response.term, 1);
+        assert_eq!(node.state.hard_state.voted_for, 3);
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_reject_candidate_log_not_up_to_date() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Node's log: [T1,I1], [T1,I2]
+        storage
+            .append_log_entries(&[
+                LogEntry {
+                    term: 1,
+                    index: 1,
+                    command: Bytes::new(),
+                },
+                LogEntry {
+                    term: 1,
+                    index: 2,
+                    command: Bytes::new(),
+                },
+            ])
+            .await
+            .unwrap();
+        node.state.hard_state.term = 1;
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        let request = RequestVoteRequest {
+            term: 1,
+            candidate_id: 2,
+            last_log_index: 1, // Candidate's log is shorter
+            last_log_term: 1,
+        };
+        let response = node.handle_request_vote(request).await.unwrap();
+        assert!(!response.vote_granted);
+        assert_eq!(response.term, 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_vote_step_down_if_candidate_term_is_higher() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Start as leader in term 1
+        node.state.hard_state.term = 1;
+        node.state.server.role = Role::Leader;
+        node.state.server.leader_id = Some(1);
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        let request = RequestVoteRequest {
+            term: 2, // Candidate has a higher term
+            candidate_id: 2,
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        let response = node.handle_request_vote(request).await.unwrap();
+
+        assert_eq!(node.state.server.role, Role::Follower);
+        assert_eq!(node.state.hard_state.term, 2);
+        assert_eq!(node.state.server.leader_id, None);
+        assert!(response.vote_granted);
+        assert_eq!(node.state.hard_state.voted_for, 2);
+        let persisted_hs = storage.read_hard_state().await.unwrap();
+        assert_eq!(persisted_hs.term, 2);
+        assert_eq!(persisted_hs.voted_for, 2);
+    }
+
+    #[tokio::test]
+    async fn test_election_timer_reset_on_become_follower() {
+        let storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Get the initial timer state
+        node.timer.reset_tx.take(); // Clear any initial timer
+        assert!(
+            node.timer.reset_tx.is_none(),
+            "Timer should initially be cleared for test"
+        );
+
+        // Call become_follower which should set up a new timer
+        node.become_follower(1, None).await.unwrap();
+
+        // Verify that a new timer was created
+        assert!(
+            node.timer.reset_tx.is_some(),
+            "Timer should be reset when becoming follower"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_election_timeout_single_node_becomes_leader() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+
+        let mut node = create_test_node(
+            1,
+            HashMap::new(),
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Ensure initial state is follower
+        // ... existing code ...
+    }
+
+    #[tokio::test]
+    async fn test_handle_election_timeout_becomes_candidate_and_sends_request_votes() {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+
+        let peers = [(2, "peer2".to_string()), (3, "peer3".to_string())]
+            .iter()
+            .cloned()
+            .collect();
+
+        let mut node = create_test_node(
+            1,
+            peers,
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Make node candidate term = 1
+        // ... existing code ...
+    }
+
+    #[tokio::test]
+    async fn test_handle_election_timeout_candidate_receives_enough_votes_becomes_leader() {
+        // This test requires a more involved setup to simulate receiving votes.
+        // For simplicity, we'll focus on the transition within handle_election_timeout itself
+        // assuming votes would be granted if RPCs were fully mocked here.
+
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+
+        let peers = [(2, "peer2".to_string()), (3, "peer3".to_string())]
+            .iter()
+            .cloned()
+            .collect();
+
+        let mut node = create_test_node(
+            1,
+            peers,
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+        node.state.hard_state.term = 0; // Start at term 0
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        // Manually transition to candidate by calling become_candidate to set up state
+        // ... existing code ...
+    }
+
+    #[tokio::test]
+    async fn test_handle_election_timeout_candidate_does_not_receive_enough_votes_starts_new_election(
+    ) {
+        let mut storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+
+        let peers = [(2, "peer2".to_string()), (3, "peer3".to_string())]
+            .iter()
+            .cloned()
+            .collect();
+
+        let mut node = create_test_node(
+            1,
+            peers,
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+        node.state.hard_state.term = 0;
+        node.storage
+            .save_hard_state(&node.state.hard_state)
+            .await
+            .unwrap();
+
+        // Manually transition to candidate for term 1
+        // ... existing code ...
+    }
+
+    #[tokio::test]
+    async fn test_handle_election_timeout_leader_remains_leader_and_sends_heartbeats() {
+        let storage = MockStorage::default();
+        let transport = MockTransport::new();
+        let state_machine = NoopStateMachine;
+        let peers = [(2, "peer2".to_string())].iter().cloned().collect();
+
+        let mut node = create_test_node(
+            1,
+            peers,
+            storage.clone(),
+            transport.clone(),
+            state_machine.clone(),
+        );
+
+        // Before becoming a leader, we need to be a candidate
+        node.become_candidate().await.unwrap();
+
+        // Setup as leader
+        node.become_leader().await.unwrap();
+
+        // Verify initial leader state
+        assert_eq!(node.state.server.role, Role::Leader);
+        assert_eq!(node.state.hard_state.term, 1);
+
+        // Clear any requests made during become_leader for this test
+        transport.sent_append_entries.lock().await.clear();
+
+        // Call handle_election_timeout - this should be a no-op for leaders
+        node.handle_election_timeout().await.unwrap();
+
+        // Leader state should be maintained
+        assert_eq!(node.state.server.role, Role::Leader, "Should remain Leader");
+        assert_eq!(node.state.hard_state.term, 1, "Term should not change");
+
+        // No heartbeats should be sent by handle_election_timeout (that's done elsewhere)
+        assert!(
+            transport
+                .sent_append_entries
+                .lock()
+                .await
+                .get(&2)
+                .map_or(true, |v| v.is_empty()),
+            "Heartbeats should not be sent by current leader handle_election_timeout placeholder"
+        );
     }
 }

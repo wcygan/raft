@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use raft_core::{Config, NodeId, RaftNode, Role, Storage}; // Core types + Storage trait
+use raft_core::{CommandPayload, Config, NodeId, NoopStateMachine, RaftNode, Role, Storage}; // Added NoopStateMachine, CommandPayload
 use raft_storage::InMemoryStorage; // Use existing storage mock
 use raft_transport::mock::{MockTransport, TransportRegistry}; // Use existing transport mock
 use raft_transport::network::NetworkOptions; // Correct path for NetworkOptions
@@ -28,12 +28,14 @@ async fn create_test_node(
     id: NodeId,
     peers: HashMap<NodeId, String>,
     registry: Arc<TransportRegistry>, // Pass the shared registry as Arc
-) -> RaftNode<InMemoryStorage, MockTransport> {
+) -> RaftNode<InMemoryStorage, MockTransport, NoopStateMachine> {
+    // Added NoopStateMachine generic
     let config = default_config(id, peers);
     let storage = InMemoryStorage::new(); // Use the correct constructor
     let (transport, _receivers) =
         MockTransport::create_with_options(id, NetworkOptions::default(), registry).await;
-    RaftNode::new(id, config, storage, transport)
+    let state_machine = NoopStateMachine; // Create NoopStateMachine instance
+    RaftNode::new(id, config, storage, transport, state_machine) // Pass state_machine
 }
 
 // TODO: Move all tests from raft-core/src/lib.rs here and adapt them.
