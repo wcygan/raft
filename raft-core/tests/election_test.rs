@@ -1,4 +1,4 @@
-use raft_core::{Config, NodeId, RaftNode, Role, NoopStateMachine, CommandPayload};
+use raft_core::{Config, NodeId, RaftNode, Role, NoopStateMachine};
 use raft_storage::InMemoryStorage;
 use raft_transport::{MockTransport, NetworkOptions, PeerReceivers, TransportRegistry};
 use std::collections::HashMap;

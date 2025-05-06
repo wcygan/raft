@@ -1,0 +1,65 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Raft Implementation Best Practices
+
+This rule captures lessons learned while implementing and testing the Raft consensus algorithm, particularly focusing on state transitions, RPC handling, and proper test isolation.
+
+## Clear Method Responsibilities
+
+Each method in the Raft implementation ([`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs)) has specific responsibilities:
+
+*   `become_follower()`: Updates state to Follower, persists `HardState` if the term changes, resets the election timer.
+*   `become_candidate()`: Increments term, votes for self, updates state to Candidate, persists `HardState`, resets the election timer.
+*   `become_leader()`: Updates state to Leader, initializes leader-specific volatile state (`next_index`, `match_index`), cancels the election timer.
+*   `handle_election_timeout()`: If not Leader, transitions to Candidate (which calls `become_candidate()`) and then initiates the sending of `RequestVote` RPCs to all peers.
+*   `handle_request_vote()`: Processes incoming `RequestVote` RPCs according to Raft rules, potentially granting a vote and resetting the election timer, or stepping down if a higher term is encountered.
+
+**Important:** Do not assume methods perform actions beyond their documented responsibilities. For example, `become_candidate()` itself does not send `RequestVote` RPCs; this action is initiated by `handle_election_timeout()` after the node becomes a candidate.
+
+## State Transition Sequences
+
+Raft state transitions must follow the defined sequence:
+
+```
+Follower <-> Candidate <-> Leader
+```
+
+When testing specific roles, ensure the `RaftNode` has reached that role through the correct sequence of state transitions. For instance, to test leader behavior, the node should typically transition from Follower to Candidate, and then from Candidate to Leader (e.g., by simulating received votes or handling an election timeout in a single-node cluster). Directly setting `state.server.role = Role::Leader` without going through the proper initialization logic in `become_leader()` will lead to an inconsistent and non-functional leader state.
+
+Refer to `test_handle_election_timeout_leader_remains_leader_and_sends_heartbeats` in [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs) for an example of correct setup.
+
+## Testing Timer Behavior
+
+When testing election timer logic:
+
+1.  **Avoid Brittle Checks:** Do not rely on specific error types when checking if a `tokio::sync::oneshot` channel (used for timer cancellation) has been signaled (e.g., `initial_rx.await.is_err()`). The exact error or behavior upon cancellation might be subtle or change.
+2.  **Verify Timer State Directly:** Instead, verify the timer's internal state. For example, after an action that should reset or cancel the timer, check `node.timer.reset_tx.is_some()` (for a reset timer) or `node.timer.reset_tx.is_none()` (for a cancelled timer).
+3.  **Isolate Timer Setup:** In tests focused on timer reset/cancellation, ensure a clean initial state by explicitly managing the `reset_tx` (e.g., `node.timer.reset_tx.take()`) before the action under test.
+
+See `test_election_timer_reset_on_become_follower` in [`raft-core/src/lib.rs`](mdc:raft-core/src/lib.rs) for an example.
+
+## Role Awareness in RPC Handlers & Timeouts
+
+The behavior of certain operations is role-dependent:
+
+*   `handle_election_timeout()`: This method should effectively be a no-op if the node is already a `Leader`. Leaders manage their authority through heartbeats, not election timeouts.
+*   **Heartbeats vs. Election Timer**: Leaders do not run an election timer; they send periodic heartbeats (empty `AppendEntries` RPCs). Followers and Candidates *do* run election timers.
+
+## Mock Transport Interactions in Tests
+
+When writing tests that involve the `MockTransport` (or any mock component):
+
+1.  **Clear Previous Interactions:** If a test involves multiple sequential actions that interact with the transport, ensure you clear any recorded RPCs from previous steps before asserting new interactions (e.g., `transport.sent_append_entries.lock().await.clear();`).
+2.  **Correct Setup for Role-Specific Actions:** For tests involving leader actions that send RPCs (like initial heartbeats in `become_leader`), ensure the node is correctly transitioned to leader state first.
+
+## Upcoming Phase 4 (Log Replication) Considerations
+
+As development moves towards Phase 4 (Log Replication), keep these related points in mind:
+
+1.  **`handle_append_entries()` Logic:** This crucial method will need careful implementation, mirroring the rigor of `handle_request_vote()`. It must handle term checks, log consistency checks (matching `prev_log_index` and `prev_log_term`), appending entries, and updating the `commit_index`.
+2.  **Leader State for Replication:** The leader will need to diligently maintain `next_index` and `match_index` for all followers to track their progress and determine when log entries can be committed.
+3.  **Commit Index Advancement:** Implementing the rules for advancing `commit_index` on the leader (based on majority `match_index`) and on followers (based on `leader_commit` in `AppendEntriesRequest`) is vital.
+4.  **Log Consistency Enforcement:** The `Storage` trait implementation (e.g., `InMemoryStorage`) must correctly handle log appends, overwrites, and truncations to maintain Raft's log properties. Be mindful of gap detection and absolute vs. relative indexing, as detailed in `raft_storage_learnings.mdc` and `storage-implementation-lessons.mdc`.

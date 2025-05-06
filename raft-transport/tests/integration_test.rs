@@ -332,7 +332,7 @@ async fn test_concurrent_sends() {
 async fn test_temporary_partition_and_heal() {
     init_tracing();
     let registry = Arc::new(TransportRegistry::new());
-    let mut node1 = TestNode::new(1, registry.clone()).await;
+    let node1 = TestNode::new(1, registry.clone()).await;
     let mut node2 = TestNode::new(2, registry.clone()).await;
     TestNode::spawn_responder_task(node2.take_receivers());
 

@@ -996,7 +996,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_become_follower_updates_state_and_persists() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut node =
@@ -1066,7 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_become_leader_transitions_state_and_persists() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut node = create_test_node(
@@ -1111,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_log_up_to_date() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut raft_node = create_test_node(
@@ -1178,7 +1178,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_vote_grant_vote() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
 
@@ -1213,7 +1213,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_vote_reject_lower_term() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut node = create_test_node(
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_vote_reject_already_voted_for_other_in_same_term() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut node = create_test_node(
@@ -1275,7 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_vote_grant_if_already_voted_for_candidate_in_same_term() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut node = create_test_node(
@@ -1352,7 +1352,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_vote_step_down_if_candidate_term_is_higher() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
         let mut node = create_test_node(
@@ -1422,11 +1422,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_election_timeout_single_node_becomes_leader() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
 
-        let mut node = create_test_node(
+        let node = create_test_node(
             1,
             HashMap::new(),
             storage.clone(),
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_election_timeout_becomes_candidate_and_sends_request_votes() {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
 
@@ -1449,7 +1449,7 @@ mod tests {
             .cloned()
             .collect();
 
-        let mut node = create_test_node(
+        let node = create_test_node(
             1,
             peers,
             storage.clone(),
@@ -1467,7 +1467,7 @@ mod tests {
         // For simplicity, we'll focus on the transition within handle_election_timeout itself
         // assuming votes would be granted if RPCs were fully mocked here.
 
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
 
@@ -1496,7 +1496,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_election_timeout_candidate_does_not_receive_enough_votes_starts_new_election(
     ) {
-        let mut storage = MockStorage::default();
+        let storage = MockStorage::default();
         let transport = MockTransport::new();
         let state_machine = NoopStateMachine;
 

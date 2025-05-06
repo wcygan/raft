@@ -1,11 +1,10 @@
 use bytes::Bytes;
-use raft_core::{CommandPayload, Config, NodeId, NoopStateMachine, RaftNode, Role, Storage}; // Added NoopStateMachine, CommandPayload
+use raft_core::{Config, NodeId, NoopStateMachine, RaftNode, Role, Storage}; // Added NoopStateMachine, CommandPayload
 use raft_storage::InMemoryStorage; // Use existing storage mock
 use raft_transport::mock::{MockTransport, TransportRegistry}; // Use existing transport mock
 use raft_transport::network::NetworkOptions; // Correct path for NetworkOptions
 use std::collections::HashMap;
 use std::sync::Arc; // Ensure Arc is imported
-use tokio::time::Duration;
 use wcygan_raft_community_neoeinstein_prost::raft::v1::{
     HardState,
     LogEntry,
