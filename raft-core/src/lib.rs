@@ -183,6 +183,53 @@ pub trait Transport {
     // ) -> Result<InstallSnapshotResponse>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Election-timer helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct ElectionTimer {
+    /// Current randomized timeout (milliseconds)
+    duration_ms: u64,
+    /// Sender used to cancel the running sleep, if any
+    reset_tx: Option<oneshot::Sender<()>>,
+}
+
+impl ElectionTimer {
+    /// Returns an inclusive random value in `[min, max]`.
+    fn rand_range(min: u64, max: u64) -> u64 {
+        if max <= min {
+            return min;
+        }
+        // Try from_rng with deprecated thread_rng as a test
+        let mut thread_rng = rand::thread_rng(); // Get mutable rng
+        let mut rng = SmallRng::from_rng(&mut thread_rng); // Pass mutable reference
+        rng.gen_range(min..=max)
+    }
+
+    /// Resets the timer and returns `(cancel_rx, new_duration_ms)`.
+    fn reset(&mut self, min_ms: u64, max_ms: u64) -> (oneshot::Receiver<()>, u64) {
+        // Cancel previous timer (if any)
+        if let Some(tx) = self.reset_tx.take() {
+            let _ = tx.send(());
+        }
+
+        let new_duration = Self::rand_range(min_ms, max_ms);
+        self.duration_ms = new_duration;
+
+        let (tx, rx) = oneshot::channel();
+        self.reset_tx = Some(tx);
+        (rx, new_duration)
+    }
+
+    /// Cancels the currently running timer without starting a new one.
+    fn cancel(&mut self) {
+        if let Some(tx) = self.reset_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 /// The main Raft node structure, encapsulating state and logic.
 /// Generic over Storage and Transport implementations.
 pub struct RaftNode<
@@ -202,9 +249,8 @@ pub struct RaftNode<
     /// Tracks votes received during a candidacy period.
     pub votes_received: HashSet<NodeId>,
 
-    // Election timer control
-    election_timeout_duration_ms: u64, // Current randomized timeout
-    election_timer_reset_tx: Option<oneshot::Sender<()>>, // Sends signal to reset timer
+    /// Handles election-timeout state.
+    timer: ElectionTimer,
 }
 
 impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 'static>
@@ -214,7 +260,6 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
     pub fn new(id: NodeId, config: Config, storage: S, transport: T) -> Self {
         let state = RaftState::new(id);
         // TODO: Load persisted state from storage
-        // TODO: Initialize timers (election timeout)
         Self {
             id,
             state,
@@ -222,36 +267,22 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
             storage,
             transport,
             votes_received: HashSet::new(),
-            election_timeout_duration_ms: 0, // Will be set by first reset
-            election_timer_reset_tx: None,
+            timer: ElectionTimer::default(),
         }
     }
 
     /// Calculates the initial election timeout duration.
     /// Called once during initialization.
     fn initialize_election_timeout(&mut self) {
-        // Calculate the first timeout AND initialize the reset channel/sender
-        let (_initial_rx, initial_duration) = self.reset_election_timer();
-        self.election_timeout_duration_ms = initial_duration; // Store the duration
+        // Prime the first timer.
+        let (_rx, duration) = self.reset_election_timer();
+        // self.election_timeout_duration_ms = initial_duration; // Store the duration
 
         tracing::debug!(
             node_id = self.config.id,
-            timeout_ms = self.election_timeout_duration_ms,
+            timeout_ms = duration,
             "Initialized election timeout"
         );
-    }
-
-    /// Calculates a random election timeout within the configured range.
-    fn calculate_random_timeout(&self) -> u64 {
-        let min = self.config.election_timeout_min_ms;
-        let max = self.config.election_timeout_max_ms;
-        if max <= min {
-            return min;
-        }
-        // Try from_rng with deprecated thread_rng as a test
-        let mut thread_rng = rand::thread_rng(); // Get mutable rng
-        let mut rng = SmallRng::from_rng(&mut thread_rng); // Pass mutable reference
-        rng.gen_range(min..=max)
     }
 
     /// Resets the election timer.
@@ -264,24 +295,10 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
     /// The main run loop is responsible for using this information to manage
     /// the actual `tokio::time::sleep` future.
     fn reset_election_timer(&mut self) -> (oneshot::Receiver<()>, u64) {
-        // Signal the old timer task to stop, ignore error if it already completed/was dropped
-        if let Some(tx) = self.election_timer_reset_tx.take() {
-            let _ = tx.send(());
-        }
-
-        // Calculate new random duration
-        self.election_timeout_duration_ms = self.calculate_random_timeout();
-        tracing::debug!(
-            node_id = self.config.id,
-            new_timeout_ms = self.election_timeout_duration_ms,
-            "Resetting election timer"
-        );
-
-        // Create a new channel for the *next* reset signal
-        let (new_tx, new_rx) = oneshot::channel::<()>();
-        self.election_timer_reset_tx = Some(new_tx);
-
-        (new_rx, self.election_timeout_duration_ms)
+        self.timer.reset(
+            self.config.election_timeout_min_ms,
+            self.config.election_timeout_max_ms,
+        )
     }
 
     /// Transitions the node to Follower state for the given term.
@@ -424,13 +441,11 @@ impl<S: Storage + Send + Sync + 'static, T: Transport + Clone + Send + Sync + 's
         // they will eventually step down when receiving RPCs with higher terms.
         // We might need to cancel any pending election timer explicitly here if the
         // run loop doesn't handle the state transition cancellation implicitly.
-        if let Some(tx) = self.election_timer_reset_tx.take() {
-            let _ = tx.send(()); // Cancel any pending election timer
-            tracing::debug!(
-                node_id = self.config.id,
-                "Cancelled election timer upon becoming leader."
-            );
-        }
+        self.timer.cancel();
+        tracing::debug!(
+            node_id = self.config.id,
+            "Cancelled election timer upon becoming leader."
+        );
         Ok(())
     }
 
